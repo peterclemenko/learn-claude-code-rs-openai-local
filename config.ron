@@ -9,29 +9,10 @@ AgentConfig(
             temperature: 0.1,
             request_timeout_secs: 120,
             max_tokens: Some(4096),
-        ),
-        "coding": LlmConfig(
-            base_url: "http://localhost:11434/v1",
-            api_key: "ollama",
-            model: "YOUR_SECOND_OLLAMA_MODEL",
-            temperature: 0.1,
-            request_timeout_secs: 120,
-            max_tokens: Some(8192),
-        ),
-        "review": LlmConfig(
-            base_url: "http://localhost:11434/v1",
-            api_key: "ollama",
-            model: "YOUR_REVIEW_MODEL",
-            temperature: 0.0,
-            request_timeout_secs: 120,
-            max_tokens: Some(4096),
-        ),
+        )
     },
     model_roles: {
         "default": "gemma-heretic",
-        "planner": "gemma-heretic",
-        "coder": "gemma-heretic",
-        "reviewer": "gemma-heretic",
     },
 
     telemetry: TelemetryConfig(
