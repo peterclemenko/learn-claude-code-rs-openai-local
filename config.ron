@@ -9,7 +9,7 @@ AgentConfig(
             temperature: 0.1,
             request_timeout_secs: 120,
             max_tokens: Some(4096),
-        )
+        ),
     },
     model_roles: {
         "default": "gemma-heretic",
