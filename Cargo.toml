@@ -1,14 +1,17 @@
-[package]
-authors = ["Peter Clemenko <aoi@protonmail.ch>"]
-edition = "2021"
-# If you change the name here, you must also do it in flake.nix (and run `cargo generate-lockfile` afterwards)
-name = "learn-claude-code-rs-openai-local"
-description = "A simple Rust project using Nix"
-version = "0.1.0"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
-[dependencies]
+[workspace]
+resolver = "2"
+members = [
+    "learn-claude-code-rs-openai-local",
+]
+
+[workspace.package]
+license = "MIT"
+edition = "2024"
+
+[workspace.dependencies]
 anyhow = "1.0.104"
 async-openai = "0.42.2"
 async-trait = "0.1.92"
@@ -19,9 +22,13 @@ derive_builder = "0.20.2"
 dotenvy = "0.15.7"
 fs4 = "1.1.0"
 inquire = "0.9.4"
+opentelemetry = "0.33.1"
+opentelemetry-otlp = "0.33.1"
+opentelemetry_sdk = "0.33.1"
 proc-macro2 = "1.0.107"
 quote = "1.0.47"
 regex = "1.13.1"
+ron = "0.12.2"
 schemars = "1.2.3"
 serde = "1.0.229"
 serde_json = "1.0.154"
@@ -31,5 +38,8 @@ strum_macros = "0.28.0"
 syn = { version = "3.0.9", features = ["full"] }
 tera = "2.4.0"
 tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros", "rt"] }
+tracing = "0.1.44"
+tracing-opentelemetry = "0.34.0"
+tracing-subscriber = "0.3.23"
 walkdir = "2.5.0"
 wildmatch = "2.7.0"
