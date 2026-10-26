@@ -2,6 +2,10 @@
 default:
     @just --list
 
+# Toolchain setup / override check
+setup:
+    rustup show
+
 # Build all workspace packages
 build:
     cargo build --workspace
@@ -13,3 +17,7 @@ run package:
 # Run tests with OTel subscriber active
 test:
     cargo test --workspace
+
+# Run clippy checks across all packages
+lint:
+    cargo clippy --workspace --all-targets -- -D warnings
