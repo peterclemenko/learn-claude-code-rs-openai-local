@@ -21,3 +21,12 @@ test:
 # Run clippy checks across all packages
 lint:
     cargo clippy --workspace --all-targets -- -D warnings
+
+
+# Format all Rust crates in the workspace
+fmt:
+    cargo fmt --all
+
+# Check formatting without modifying files
+fmt-check:
+    cargo fmt --all -- --check
