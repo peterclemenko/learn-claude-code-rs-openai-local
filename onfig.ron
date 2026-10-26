@@ -1,0 +1,11 @@
+(
+    model: "igorls/gemma-4-E4B-it-heretic-GGUF",
+    endpoint: "http://localhost:11434/v1",
+    api_key: "not-needed",
+    temperature: 0.1,
+    max_tokens: Some(4096),
+    otel: (
+        service_name: "agent-harness",
+        endpoint: "http://localhost:4317",
+    )
+)

@@ -1,14 +1,15 @@
+# Default task: list recipes
 default:
     @just --list
 
-# Run pre-commit hooks on all files, including autoformatting
-pre-commit-all:
-    pre-commit run --all-files
+# Build all workspace packages
+build:
+    cargo build --workspace
 
-# Run 'cargo run' on the project
-run *ARGS:
-    cargo run {{ARGS}}
+# Run a specific chapter package (e.g., just run s01_agent_loop)
+run package:
+    cargo run -p {{package}}
 
-# Run 'bacon' to run the project (auto-recompiles)
-watch *ARGS:
-	bacon --job run -- -- {{ ARGS }}
+# Run tests with OTel subscriber active
+test:
+    cargo test --workspace
