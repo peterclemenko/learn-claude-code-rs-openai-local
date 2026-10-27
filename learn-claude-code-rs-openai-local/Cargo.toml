@@ -3,9 +3,8 @@ name = "learn-claude-code-rs-openai-local"
 version = "0.1.0"
 edition = "2024"
 license = { workspace = true }
-description = "A simple Rust project using Nix"
+description = "Local OpenAI-compatible coding agent with MCP plugin support"
 authors = ["Peter Clemenko <aoi@protonmail.ch>"]
-
 
 [dependencies]
 anyhow = { workspace = true }
@@ -24,6 +23,7 @@ opentelemetry_sdk = { workspace = true }
 proc-macro2 = { workspace = true }
 quote = { workspace = true }
 regex = { workspace = true }
+rmcp = { workspace = true }
 ron = { workspace = true }
 schemars = { workspace = true }
 serde = { workspace = true }
