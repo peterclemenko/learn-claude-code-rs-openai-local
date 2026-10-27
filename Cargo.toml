@@ -3,9 +3,7 @@
 
 [workspace]
 resolver = "2"
-members = [
-    "learn-claude-code-rs-openai-local",
-]
+members = ["learn-claude-code-rs-openai-local"]
 
 [workspace.package]
 license = "MIT"
@@ -13,7 +11,7 @@ edition = "2024"
 
 [workspace.dependencies]
 anyhow = "1.0.104"
-async-openai = "0.42.2"
+async-openai = { version = "0.42.2", features = ["_api"] }
 async-trait = "0.1.92"
 chrono = "0.4.45"
 clap = { version = "4.3.14", features = ["derive"] }

@@ -1,0 +1,37 @@
+{ config, pkgs, ... }:
+
+{
+  services.opentelemetry-collector = {
+    enable = true;
+
+    # Use the Nixpkgs collector distribution.
+    package = pkgs.opentelemetry-collector;
+
+    settings = {
+      receivers = {
+        otlp.protocols = {
+          grpc.endpoint = "127.0.0.1:4317";
+          http.endpoint = "127.0.0.1:4318";
+        };
+      };
+
+      processors = {
+        batch = { };
+      };
+
+      exporters = {
+        debug.verbosity = "basic";
+      };
+
+      service = {
+        pipelines = {
+          traces = {
+            receivers = [ "otlp" ];
+            processors = [ "batch" ];
+            exporters = [ "debug" ];
+          };
+        };
+      };
+    };
+  };
+}
