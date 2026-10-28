@@ -18,6 +18,10 @@ You can use [omnix](https://omnix.page/om/init.html)[^omnix] to initialize this 
 nix run nixpkgs#omnix -- init github:srid/learn-claude-code-rs-openai-local -o ~/my-rust-project
 ```
 
+Run the harness with `just run` (or `cargo run`) to start an interactive session.
+Enter `exit()` to quit. To send a single prompt without starting the REPL, run
+`cargo run -- --prompt "Your question"`.
+
 [^omnix]: If initializing manually, make sure to:
     - Change `name` in Cargo.toml.
     - Run `cargo generate-lockfile` in the nix shelld

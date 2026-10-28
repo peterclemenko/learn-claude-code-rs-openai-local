@@ -6,14 +6,18 @@ use async_openai::{
     Client,
     config::OpenAIConfig,
     types::chat::{
+        ChatCompletionRequestAssistantMessageArgs, ChatCompletionRequestMessage,
         ChatCompletionRequestSystemMessageArgs, ChatCompletionRequestUserMessageArgs,
         CreateChatCompletionRequestArgs,
     },
 };
 use clap::Parser;
+use inquire::Text;
 use serde::Deserialize;
-use tracing::{debug, info};
+use tracing::info;
 use tracing_subscriber::prelude::*;
+
+const SYSTEM_PROMPT: &str = "You are a helpful coding assistant.";
 
 #[derive(Debug, Parser)]
 #[command(author, version, about)]
@@ -106,43 +110,20 @@ fn build_client(config: &LlmConfig) -> Client<OpenAIConfig> {
     Client::with_config(api_config)
 }
 
-async fn run_prompt(config: &AgentConfig, prompt: &str) -> Result<()> {
-    let profile_name = config
-        .model_roles
-        .get("default")
-        .unwrap_or(&config.default_model);
-
-    let model_config = config
-        .models
-        .get(profile_name)
-        .context("Resolved model profile does not exist")?;
-
-    let client = build_client(model_config);
-
+async fn request_completion(
+    client: &Client<OpenAIConfig>,
+    model_config: &LlmConfig,
+    messages: &[ChatCompletionRequestMessage],
+) -> Result<String> {
     let mut request_args = CreateChatCompletionRequestArgs::default();
     request_args
         .model(&model_config.model)
-        .messages([
-            ChatCompletionRequestSystemMessageArgs::default()
-                .content("You are a helpful coding assistant.")
-                .build()?
-                .into(),
-            ChatCompletionRequestUserMessageArgs::default()
-                .content(prompt)
-                .build()?
-                .into(),
-        ])
+        .messages(messages.to_vec())
         .temperature(model_config.temperature);
     if let Some(max_tokens) = model_config.max_tokens {
         request_args.max_completion_tokens(max_tokens);
     }
     let request = request_args.build()?;
-
-    info!(
-        profile = %profile_name,
-        model = %model_config.model,
-        "Sending chat completion request"
-    );
 
     let response = tokio::time::timeout(
         Duration::from_secs(model_config.request_timeout_secs),
@@ -152,14 +133,89 @@ async fn run_prompt(config: &AgentConfig, prompt: &str) -> Result<()> {
     .context("Model request timed out")?
     .context("OpenAI-compatible API request failed")?;
 
-    if let Some(content) = response
+    response
         .choices
         .first()
         .and_then(|choice| choice.message.content.as_deref())
-    {
-        println!("{content}");
-    } else {
-        debug!("Model returned no text content");
+        .map(str::to_owned)
+        .context("Model response did not contain text content")
+}
+
+fn resolve_model(config: &AgentConfig) -> Result<(&str, &LlmConfig)> {
+    let profile_name = config
+        .model_roles
+        .get("default")
+        .unwrap_or(&config.default_model);
+    let model_config = config
+        .models
+        .get(profile_name)
+        .context("Resolved model profile does not exist")?;
+    Ok((profile_name, model_config))
+}
+
+async fn run_prompt(config: &AgentConfig, prompt: &str) -> Result<()> {
+    let (profile_name, model_config) = resolve_model(config)?;
+    let client = build_client(model_config);
+    let messages = vec![
+        ChatCompletionRequestSystemMessageArgs::default()
+            .content(SYSTEM_PROMPT)
+            .build()?
+            .into(),
+        ChatCompletionRequestUserMessageArgs::default()
+            .content(prompt)
+            .build()?
+            .into(),
+    ];
+
+    info!(
+        profile = %profile_name,
+        model = %model_config.model,
+        "Sending chat completion request"
+    );
+    let response = request_completion(&client, model_config, &messages).await?;
+    println!("{response}");
+
+    Ok(())
+}
+
+async fn run_repl(config: &AgentConfig) -> Result<()> {
+    let (profile_name, model_config) = resolve_model(config)?;
+    let client = build_client(model_config);
+    let mut messages = vec![
+        ChatCompletionRequestSystemMessageArgs::default()
+            .content(SYSTEM_PROMPT)
+            .build()?
+            .into(),
+    ];
+
+    info!(
+        profile = %profile_name,
+        model = %model_config.model,
+        "Interactive session started; enter exit() to quit"
+    );
+
+    loop {
+        let prompt = Text::new("--- How can I help you?")
+            .prompt()
+            .context("Failed to read prompt")?;
+        if prompt.trim() == "exit()" {
+            break;
+        }
+
+        messages.push(
+            ChatCompletionRequestUserMessageArgs::default()
+                .content(prompt)
+                .build()?
+                .into(),
+        );
+        let response = request_completion(&client, model_config, &messages).await?;
+        println!("--- Final response:\n{response}");
+        messages.push(
+            ChatCompletionRequestAssistantMessageArgs::default()
+                .content(response)
+                .build()?
+                .into(),
+        );
     }
 
     Ok(())
@@ -182,11 +238,7 @@ async fn run() -> Result<()> {
     if let Some(prompt) = args.prompt {
         run_prompt(&config, &prompt).await?;
     } else {
-        info!(
-            profile = %config.default_model,
-            "Agent initialized; supply --prompt to send a request"
-        );
-        println!("Configuration loaded successfully.");
+        run_repl(&config).await?;
     }
 
     Ok(())
