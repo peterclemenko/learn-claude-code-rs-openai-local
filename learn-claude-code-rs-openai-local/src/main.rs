@@ -6,7 +6,7 @@ use async_openai::{
     Client,
     config::OpenAIConfig,
     types::chat::{
-        ChatCompletionRequestSystemMessage, ChatCompletionRequestUserMessage,
+        ChatCompletionRequestSystemMessageArgs, ChatCompletionRequestUserMessageArgs,
         CreateChatCompletionRequestArgs,
     },
 };
@@ -119,7 +119,8 @@ async fn run_prompt(config: &AgentConfig, prompt: &str) -> Result<()> {
 
     let client = build_client(model_config);
 
-    let request = CreateChatCompletionRequestArgs::default()
+    let mut request_args = CreateChatCompletionRequestArgs::default();
+    request_args
         .model(&model_config.model)
         .messages([
             ChatCompletionRequestSystemMessageArgs::default()
@@ -131,9 +132,11 @@ async fn run_prompt(config: &AgentConfig, prompt: &str) -> Result<()> {
                 .build()?
                 .into(),
         ])
-        .temperature(model_config.temperature)
-        .max_tokens(model_config.max_tokens)
-        .build()?;
+        .temperature(model_config.temperature);
+    if let Some(max_tokens) = model_config.max_tokens {
+        request_args.max_completion_tokens(max_tokens);
+    }
+    let request = request_args.build()?;
 
     info!(
         profile = %profile_name,
@@ -143,7 +146,7 @@ async fn run_prompt(config: &AgentConfig, prompt: &str) -> Result<()> {
 
     let response = tokio::time::timeout(
         Duration::from_secs(model_config.request_timeout_secs),
-        client.chat().completions().create(request),
+        client.chat().create(request),
     )
     .await
     .context("Model request timed out")?

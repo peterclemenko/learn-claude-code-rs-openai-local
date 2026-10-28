@@ -11,7 +11,7 @@ edition = "2024"
 
 [workspace.dependencies]
 anyhow = "1.0.104"
-async-openai = { version = "0.42.2", features = ["_api"] }
+async-openai = { version = "0.42.2", features = ["chat-completion"] }
 async-trait = "0.1.92"
 chrono = "0.4.45"
 clap = { version = "4.3.14", features = ["derive"] }
