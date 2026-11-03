@@ -1,0 +1,14 @@
+AgentRonConfig(
+    name: "local-agent",
+    base_url: "http://localhost:11434/v1",
+    api_key: "ollama",
+    model: "igorls/gemma-4-E4B-it-heretic-GGUF",
+    system_prompt: "You are a helpful local coding assistant. Use the provided tools when needed. Tool inputs and outputs use TOON notation.",
+    temperature: 0.1,
+    max_turns: 8,
+    telemetry: TelemetryConfig(
+        enabled: true,
+        service_name: "learn-claude-code-rs-openai-local",
+        otlp_endpoint: "http://localhost:4317",
+    ),
+)

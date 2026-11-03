@@ -22,6 +22,13 @@ Run the harness with `just run` (or `cargo run`) to start an interactive session
 Enter `exit()` to quit. To send a single prompt without starting the REPL, run
 `cargo run -- --prompt "Your question"`.
 
+The agent settings are loaded from [`config/agent.ron`](./config/agent.ron).
+The default endpoint is Ollama's OpenAI-compatible API at
+`http://localhost:11434/v1`; set `base_url` and `api_key` for another local
+server such as vLLM or llama.cpp. Tools advertise TOON signatures and exchange
+TOON payloads and tabular results. OpenTelemetry spans are exported to the
+configured OTLP endpoint when telemetry is enabled.
+
 [^omnix]: If initializing manually, make sure to:
     - Change `name` in Cargo.toml.
     - Run `cargo generate-lockfile` in the nix shelld
