@@ -1,8 +1,13 @@
 mod agent;
+mod context_window;
 mod tools;
 mod types;
 
-use std::{path::PathBuf, time::Duration};
+use std::{
+    path::PathBuf,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
 use anyhow::{Context, Result};
 use async_openai::types::chat::{
@@ -16,7 +21,10 @@ use opentelemetry_otlp::WithExportConfig;
 use opentelemetry_sdk::{Resource, trace::SdkTracerProvider};
 use tracing_subscriber::{Layer, layer::SubscriberExt, util::SubscriberInitExt};
 
-use crate::{agent::Agent, types::AgentRonConfig};
+use crate::{
+    agent::Agent,
+    types::{AgentRonConfig, TodoState},
+};
 
 #[derive(Debug, Parser)]
 #[command(author, version, about)]
@@ -114,7 +122,8 @@ async fn run() -> Result<()> {
     let args = Args::parse();
     let config = AgentRonConfig::load(&args.config)?;
     let provider = init_tracing(&config, args.verbose)?;
-    let agent = Agent::new(config.clone());
+    let todo_state = Arc::new(Mutex::new(TodoState::default()));
+    let agent = Agent::new(config.clone(), todo_state);
 
     let result = if let Some(prompt) = args.prompt {
         run_prompt(&agent, &prompt).await

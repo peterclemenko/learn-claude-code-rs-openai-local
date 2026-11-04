@@ -26,8 +26,18 @@ The agent settings are loaded from [`config/agent.ron`](./config/agent.ron).
 The default endpoint is Ollama's OpenAI-compatible API at
 `http://localhost:11434/v1`; set `base_url` and `api_key` for another local
 server such as vLLM or llama.cpp. Tools advertise TOON signatures and exchange
-TOON payloads and tabular results. OpenTelemetry spans are exported to the
-configured OTLP endpoint when telemetry is enabled.
+TOON results; OpenAI-compatible JSON tool arguments are also accepted.
+OpenTelemetry spans are exported to the configured OTLP endpoint when telemetry
+is enabled.
+The agent also exposes `todo_write` for maintaining a task list in TOON format;
+the latest task state is injected into the system context on every model turn.
+Tool spans record duration, success, input/output bytes, and rough token
+estimates for every registered tool. Model request spans record exact
+prompt/completion/total tokens when the backend reports them, plus prompt
+utilization against the active Ollama context size from `/api/ps`. Per-tool
+token counts are byte-based estimates, not tokenizer-exact counts. Configure
+`ollama_base_url` for Ollama; other runtimes can implement the shared
+`ContextWindowProvider` interface.
 
 [^omnix]: If initializing manually, make sure to:
     - Change `name` in Cargo.toml.
