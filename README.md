@@ -28,7 +28,8 @@ The default endpoint is Ollama's OpenAI-compatible API at
 server such as vLLM or llama.cpp. Tools advertise TOON signatures and exchange
 TOON results; OpenAI-compatible JSON tool arguments are also accepted.
 OpenTelemetry spans are exported to the configured OTLP endpoint when telemetry
-is enabled.
+is enabled. Export is disabled by default; set `OTEL_SDK_DISABLED=false` to
+enable it when a collector is available.
 The agent also exposes `todo_write` for maintaining a task list in TOON format;
 the latest task state is injected into the system context on every model turn.
 Tool spans record duration, success, input/output bytes, and rough token

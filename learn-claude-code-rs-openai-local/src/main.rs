@@ -43,6 +43,7 @@ struct Args {
 }
 
 fn init_tracing(config: &AgentRonConfig, verbose: bool) -> Result<Option<SdkTracerProvider>> {
+    let telemetry_enabled = telemetry_enabled(config.telemetry.enabled)?;
     let level = if verbose {
         tracing::Level::DEBUG
     } else {
@@ -52,7 +53,7 @@ fn init_tracing(config: &AgentRonConfig, verbose: bool) -> Result<Option<SdkTrac
         .with_writer(std::io::stderr)
         .with_filter(tracing_subscriber::filter::LevelFilter::from_level(level));
 
-    if !config.telemetry.enabled {
+    if !telemetry_enabled {
         tracing_subscriber::registry()
             .with(format_layer)
             .try_init()
@@ -82,6 +83,31 @@ fn init_tracing(config: &AgentRonConfig, verbose: bool) -> Result<Option<SdkTrac
         .context("Failed to initialize tracing and OpenTelemetry subscribers")?;
 
     Ok(Some(provider))
+}
+
+fn telemetry_enabled(config_enabled: bool) -> Result<bool> {
+    match std::env::var("OTEL_SDK_DISABLED") {
+        Ok(value) => resolve_telemetry_enabled(config_enabled, Some(&value)),
+        Err(std::env::VarError::NotPresent) => resolve_telemetry_enabled(config_enabled, None),
+        Err(error) => Err(error).context("Failed to read OTEL_SDK_DISABLED"),
+    }
+}
+
+fn resolve_telemetry_enabled(
+    config_enabled: bool,
+    otel_sdk_disabled: Option<&str>,
+) -> Result<bool> {
+    match otel_sdk_disabled {
+        Some(value) => Ok(!parse_otel_sdk_disabled(value)?),
+        None => Ok(config_enabled),
+    }
+}
+
+fn parse_otel_sdk_disabled(value: &str) -> Result<bool> {
+    value
+        .to_ascii_lowercase()
+        .parse::<bool>()
+        .with_context(|| format!("OTEL_SDK_DISABLED must be 'true' or 'false', got '{value}'"))
 }
 
 async fn run_prompt(agent: &Agent, prompt: &str) -> Result<()> {
@@ -144,4 +170,25 @@ async fn main() -> Result<()> {
     tokio::time::timeout(Duration::from_secs(3600), run())
         .await
         .context("Agent session exceeded the one-hour timeout")?
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{parse_otel_sdk_disabled, resolve_telemetry_enabled};
+
+    #[test]
+    fn parses_otel_sdk_disabled_environment_values() {
+        assert!(parse_otel_sdk_disabled("true").unwrap());
+        assert!(!parse_otel_sdk_disabled("false").unwrap());
+        assert!(parse_otel_sdk_disabled("TRUE").unwrap());
+        assert!(parse_otel_sdk_disabled("yes").is_err());
+    }
+
+    #[test]
+    fn telemetry_defaults_to_config_and_environment_can_override() {
+        assert!(!resolve_telemetry_enabled(false, None).unwrap());
+        assert!(resolve_telemetry_enabled(true, None).unwrap());
+        assert!(!resolve_telemetry_enabled(true, Some("true")).unwrap());
+        assert!(resolve_telemetry_enabled(false, Some("false")).unwrap());
+    }
 }

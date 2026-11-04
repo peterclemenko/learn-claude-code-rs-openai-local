@@ -15,9 +15,16 @@
         bacon
         pkg-config
         openssl
+        cacert
       ];
 
       shellHook = ''
+        export SSL_CERT_FILE="${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt"
+        export SYSTEM_CERT_FILE="${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt"
+        export NIX_SSL_CERT_FILE="${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt"
+        export SSL_CERT_DIR=""
+        export OTEL_SDK_DISABLED="''${OTEL_SDK_DISABLED:-true}"
+
         # Ensure user-level cargo bin (managed by rustup) is in PATH
         export PATH="$HOME/.cargo/bin:$PATH"
         

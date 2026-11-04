@@ -8,7 +8,7 @@ AgentRonConfig(
     max_turns: 8,
     ollama_base_url: "http://localhost:11434",
     telemetry: TelemetryConfig(
-        enabled: true,
+        enabled: false,
         service_name: "learn-claude-code-rs-openai-local",
         otlp_endpoint: "http://localhost:4317",
     ),
