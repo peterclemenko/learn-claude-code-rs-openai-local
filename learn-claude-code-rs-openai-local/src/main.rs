@@ -1,5 +1,6 @@
 mod agent;
 mod context_window;
+mod subagent;
 mod tools;
 mod types;
 

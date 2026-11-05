@@ -1,4 +1,4 @@
-use std::{fmt, fs, path::Path, str::FromStr};
+use std::{collections::BTreeSet, fmt, fs, path::Path, str::FromStr};
 
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
@@ -94,10 +94,32 @@ pub struct AgentRonConfig {
     pub system_prompt: String,
     pub temperature: f32,
     pub max_turns: usize,
+    #[serde(default = "default_agent_tools")]
+    pub allowed_tools: Vec<String>,
+    #[serde(default)]
+    pub subagents: Vec<SubagentConfig>,
     #[serde(default = "default_ollama_base_url")]
     pub ollama_base_url: String,
     #[serde(default)]
     pub telemetry: TelemetryConfig,
+}
+
+#[derive(Debug, Deserialize, Clone, PartialEq, Eq)]
+pub struct SubagentConfig {
+    pub name: String,
+    pub description: String,
+    pub allowed_tools: Vec<String>,
+    pub max_depth: usize,
+    pub system_prompt_template: String,
+    #[serde(default)]
+    pub model: Option<String>,
+}
+
+fn default_agent_tools() -> Vec<String> {
+    ["bash", "read_file", "todo_write"]
+        .into_iter()
+        .map(str::to_owned)
+        .collect()
 }
 
 fn default_ollama_base_url() -> String {
@@ -147,9 +169,70 @@ impl AgentRonConfig {
         if config.max_turns == 0 {
             bail!("Agent max_turns must be greater than zero");
         }
+        validate_tool_names(&config.allowed_tools, "agent")?;
+        if config
+            .allowed_tools
+            .iter()
+            .any(|tool| tool == "delegate_task")
+            && config.subagents.is_empty()
+        {
+            bail!("Agent allows 'delegate_task' but declares no subagents");
+        }
+
+        let mut subagent_names = BTreeSet::new();
+        for subagent in &config.subagents {
+            if subagent.name.trim().is_empty() {
+                bail!("Subagent name must not be empty");
+            }
+            if !subagent_names.insert(&subagent.name) {
+                bail!("Duplicate subagent name '{}'", subagent.name);
+            }
+            if subagent.description.trim().is_empty() {
+                bail!("Subagent '{}' description must not be empty", subagent.name);
+            }
+            if subagent.max_depth == 0 {
+                bail!(
+                    "Subagent '{}' max_depth must be greater than zero",
+                    subagent.name
+                );
+            }
+            if subagent.system_prompt_template.trim().is_empty() {
+                bail!(
+                    "Subagent '{}' system_prompt_template must not be empty",
+                    subagent.name
+                );
+            }
+            if subagent
+                .model
+                .as_deref()
+                .is_some_and(|model| model.trim().is_empty())
+            {
+                bail!("Subagent '{}' model must not be empty", subagent.name);
+            }
+            validate_tool_names(
+                &subagent.allowed_tools,
+                &format!("subagent '{}'", subagent.name),
+            )?;
+        }
 
         Ok(config)
     }
+}
+
+fn validate_tool_names(tools: &[String], owner: &str) -> Result<()> {
+    let mut names = BTreeSet::new();
+    for tool in tools {
+        if !matches!(
+            tool.as_str(),
+            "bash" | "read_file" | "todo_write" | "delegate_task"
+        ) {
+            bail!("{owner} declares unknown tool '{tool}'");
+        }
+        if !names.insert(tool) {
+            bail!("{owner} declares duplicate tool '{tool}'");
+        }
+    }
+    Ok(())
 }
 
 pub fn parse_toon_field(payload: &str, tool: &str, field: &str) -> Result<String> {
@@ -415,6 +498,8 @@ pub(crate) fn parse_toon_table(
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
     use super::{
         AgentRonConfig, TodoItem, TodoState, TodoStatus, parse_toon_field, parse_toon_table,
         toon_string, toon_table,
@@ -511,11 +596,52 @@ mod tests {
                 system_prompt: "Be helpful.",
                 temperature: 0.2,
                 max_turns: 4,
+                allowed_tools: ["bash", "delegate_task"],
+                subagents: [
+                    SubagentConfig(
+                        name: "code_runner",
+                        description: "Run local code",
+                        allowed_tools: ["bash", "delegate_task"],
+                        max_depth: 2,
+                        system_prompt_template: "You are {name}. Parent context: {context}",
+                    ),
+                ],
             )"#,
         )
         .unwrap();
         assert_eq!(config.model, "test-model");
         assert_eq!(config.ollama_base_url, "http://localhost:11434");
         assert!(!config.telemetry.enabled);
+        assert_eq!(config.allowed_tools, ["bash", "delegate_task"]);
+        assert_eq!(config.subagents[0].name, "code_runner");
+        assert_eq!(config.subagents[0].max_depth, 2);
+    }
+
+    #[test]
+    fn loads_repository_subagent_manifests_from_ron() {
+        let config_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("config/agent.ron");
+        let config = AgentRonConfig::load(config_path).unwrap();
+        assert!(config.allowed_tools.contains(&"delegate_task".to_owned()));
+        assert_eq!(
+            config
+                .subagents
+                .iter()
+                .map(|subagent| subagent.name.as_str())
+                .collect::<Vec<_>>(),
+            ["code_runner", "reviewer"]
+        );
+        assert!(
+            config.subagents[0]
+                .allowed_tools
+                .contains(&"bash".to_owned())
+        );
+        assert!(
+            !config.subagents[1]
+                .allowed_tools
+                .contains(&"bash".to_owned())
+        );
     }
 }

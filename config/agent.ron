@@ -6,6 +6,23 @@ AgentRonConfig(
     system_prompt: "You are a helpful local coding assistant. Use the provided tools when needed. Tool inputs and outputs use TOON notation.",
     temperature: 0.1,
     max_turns: 8,
+    allowed_tools: ["bash", "read_file", "todo_write", "delegate_task"],
+    subagents: [
+        SubagentConfig(
+            name: "code_runner",
+            description: "Isolated local coding and validation agent",
+            allowed_tools: ["bash", "read_file", "todo_write", "delegate_task"],
+            max_depth: 2,
+            system_prompt_template: "You are {name}, {description}. Complete the delegated task independently. Use only your configured tools. Parent context: {context}",
+        ),
+        SubagentConfig(
+            name: "reviewer",
+            description: "Read-only subagent for reviewing local code",
+            allowed_tools: ["read_file"],
+            max_depth: 2,
+            system_prompt_template: "You are {name}, {description}. Review the delegated task using only read-only context. Parent context: {context}",
+        ),
+    ],
     ollama_base_url: "http://localhost:11434",
     telemetry: TelemetryConfig(
         enabled: false,
