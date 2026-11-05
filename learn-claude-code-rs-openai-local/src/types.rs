@@ -1,4 +1,9 @@
-use std::{collections::BTreeSet, fmt, fs, path::Path, str::FromStr};
+use std::{
+    collections::BTreeSet,
+    fmt, fs,
+    path::{Path, PathBuf},
+    str::FromStr,
+};
 
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
@@ -100,6 +105,8 @@ pub struct AgentRonConfig {
     pub subagents: Vec<SubagentConfig>,
     #[serde(default = "default_ollama_base_url")]
     pub ollama_base_url: String,
+    #[serde(default = "default_skills_dir")]
+    pub skills_dir: PathBuf,
     #[serde(default)]
     pub telemetry: TelemetryConfig,
 }
@@ -126,6 +133,10 @@ fn default_ollama_base_url() -> String {
     "http://localhost:11434".to_owned()
 }
 
+fn default_skills_dir() -> PathBuf {
+    PathBuf::from("skills")
+}
+
 #[derive(Debug, Deserialize, Clone)]
 pub struct TelemetryConfig {
     pub enabled: bool,
@@ -148,8 +159,14 @@ impl AgentRonConfig {
         let path = path.as_ref();
         let contents = fs::read_to_string(path)
             .with_context(|| format!("Failed to read agent config {}", path.display()))?;
-        let config: Self = ron::from_str(&contents)
+        let mut config: Self = ron::from_str(&contents)
             .with_context(|| format!("Failed to parse RON agent config {}", path.display()))?;
+        if config.skills_dir.is_relative() {
+            config.skills_dir = path
+                .parent()
+                .unwrap_or_else(|| Path::new("."))
+                .join(&config.skills_dir);
+        }
 
         if config.name.trim().is_empty() {
             bail!("Agent name must not be empty");
@@ -498,7 +515,7 @@ pub(crate) fn parse_toon_table(
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
 
     use super::{
         AgentRonConfig, TodoItem, TodoState, TodoStatus, parse_toon_field, parse_toon_table,
@@ -611,6 +628,7 @@ mod tests {
         .unwrap();
         assert_eq!(config.model, "test-model");
         assert_eq!(config.ollama_base_url, "http://localhost:11434");
+        assert_eq!(config.skills_dir, PathBuf::from("skills"));
         assert!(!config.telemetry.enabled);
         assert_eq!(config.allowed_tools, ["bash", "delegate_task"]);
         assert_eq!(config.subagents[0].name, "code_runner");
@@ -624,6 +642,7 @@ mod tests {
             .unwrap()
             .join("config/agent.ron");
         let config = AgentRonConfig::load(config_path).unwrap();
+        assert!(config.skills_dir.ends_with("skills"));
         assert!(config.allowed_tools.contains(&"delegate_task".to_owned()));
         assert_eq!(
             config

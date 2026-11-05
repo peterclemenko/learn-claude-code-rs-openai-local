@@ -20,6 +20,7 @@ use tracing::{Instrument, info, instrument, warn};
 
 use crate::{
     context_window::{ContextWindowProvider, OllamaContextWindowProvider},
+    skills::SkillRegistry,
     subagent::DelegateTaskTool,
     tools::{BashTool, ReadFileTool, TodoTool, ToolRegistry},
     types::{AgentRonConfig, SubagentConfig, TodoState},
@@ -56,6 +57,7 @@ pub(crate) struct AgentRuntime {
     pub(crate) client: Arc<dyn ChatCompletionClient>,
     pub(crate) context_window_provider: Arc<dyn ContextWindowProvider>,
     pub(crate) subagents: Arc<Vec<SubagentConfig>>,
+    pub(crate) skills: Arc<SkillRegistry>,
 }
 
 pub struct Agent {
@@ -64,12 +66,14 @@ pub struct Agent {
     tools: ToolRegistry,
     todo_state: Arc<Mutex<TodoState>>,
     context_window_provider: Arc<dyn ContextWindowProvider>,
+    skills: Arc<SkillRegistry>,
+    allowed_tools: Vec<String>,
     depth: usize,
     turns_completed: AtomicUsize,
 }
 
 impl Agent {
-    pub fn new(config: AgentRonConfig, todo_state: Arc<Mutex<TodoState>>) -> Self {
+    pub fn new(config: AgentRonConfig, todo_state: Arc<Mutex<TodoState>>) -> Result<Self> {
         let context_window_provider =
             Arc::new(OllamaContextWindowProvider::new(&config.ollama_base_url));
         Self::new_with_context_window_provider(config, todo_state, context_window_provider)
@@ -79,7 +83,7 @@ impl Agent {
         config: AgentRonConfig,
         todo_state: Arc<Mutex<TodoState>>,
         context_window_provider: Arc<dyn ContextWindowProvider>,
-    ) -> Self {
+    ) -> Result<Self> {
         let client = Arc::new(OpenAiChatCompletionClient {
             client: Client::with_config(
                 OpenAIConfig::new()
@@ -95,11 +99,29 @@ impl Agent {
         todo_state: Arc<Mutex<TodoState>>,
         context_window_provider: Arc<dyn ContextWindowProvider>,
         client: Arc<dyn ChatCompletionClient>,
+    ) -> Result<Self> {
+        let skills = Arc::new(SkillRegistry::load_dir(&config.skills_dir)?);
+        Ok(Self::new_with_runtime(
+            config,
+            todo_state,
+            context_window_provider,
+            client,
+            skills,
+        ))
+    }
+
+    fn new_with_runtime(
+        config: AgentRonConfig,
+        todo_state: Arc<Mutex<TodoState>>,
+        context_window_provider: Arc<dyn ContextWindowProvider>,
+        client: Arc<dyn ChatCompletionClient>,
+        skills: Arc<SkillRegistry>,
     ) -> Self {
         let runtime = AgentRuntime {
             client,
             context_window_provider,
             subagents: Arc::new(config.subagents.clone()),
+            skills,
         };
         let allowed_tools = config.allowed_tools.clone();
         Self::from_runtime(config, todo_state, runtime, 0, None, allowed_tools)
@@ -145,6 +167,8 @@ impl Agent {
             tools,
             todo_state,
             context_window_provider: runtime.context_window_provider,
+            skills: runtime.skills,
+            allowed_tools,
             depth,
             turns_completed: AtomicUsize::new(0),
         }
@@ -176,9 +200,14 @@ impl Agent {
     ) -> Result<String> {
         self.turns_completed.store(0, Ordering::Relaxed);
         for turn in 1..=self.config.max_turns {
-            self.inject_todo_context(messages)?;
             let span = tracing::span!(tracing::Level::INFO, "agent.turn", turn);
-            match self.request_turn(messages).instrument(span).await? {
+            let outcome = async {
+                self.inject_dynamic_context(messages)?;
+                self.request_turn(messages).await
+            }
+            .instrument(span)
+            .await?;
+            match outcome {
                 TurnOutcome::Complete(content) => {
                     self.turns_completed.store(turn, Ordering::Relaxed);
                     return Ok(content);
@@ -200,16 +229,25 @@ impl Agent {
         )
     }
 
-    fn inject_todo_context(&self, messages: &mut Vec<ChatCompletionRequestMessage>) -> Result<()> {
+    fn inject_dynamic_context(
+        &self,
+        messages: &mut Vec<ChatCompletionRequestMessage>,
+    ) -> Result<()> {
         let todo_context = self
             .todo_state
             .lock()
             .map_err(|error| anyhow::anyhow!("Todo state mutex is poisoned: {error}"))?
             .render_toon_context();
-        let system_prompt = format!(
+        let task = latest_user_text(messages)?;
+        let skill_context = self.skills.render_context(&task, &self.allowed_tools);
+        let mut system_prompt = format!(
             "{}\n\nActive TODO task state (TOON):\n{}",
             self.config.system_prompt, todo_context
         );
+        if !skill_context.is_empty() {
+            system_prompt.push_str("\n\nRelevant skill instructions:\n");
+            system_prompt.push_str(&skill_context);
+        }
         let system_message = ChatCompletionRequestSystemMessageArgs::default()
             .content(system_prompt)
             .build()?
@@ -404,6 +442,29 @@ fn context_window_utilization(prompt_tokens: u32, capacity: u64) -> Option<f64> 
     (capacity > 0).then(|| f64::from(prompt_tokens) / capacity as f64 * 100.0)
 }
 
+fn latest_user_text(messages: &[ChatCompletionRequestMessage]) -> Result<String> {
+    let Some(message) = messages
+        .iter()
+        .rev()
+        .find(|message| matches!(message, ChatCompletionRequestMessage::User(_)))
+    else {
+        return Ok(String::new());
+    };
+    let message = serde_json::to_value(message).context("Failed to inspect user message")?;
+    let Some(content) = message.get("content") else {
+        return Ok(String::new());
+    };
+    match content {
+        serde_json::Value::String(text) => Ok(text.clone()),
+        serde_json::Value::Array(parts) => Ok(parts
+            .iter()
+            .filter_map(|part| part.get("text").and_then(serde_json::Value::as_str))
+            .collect::<Vec<_>>()
+            .join("\n")),
+        _ => Ok(String::new()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::{
@@ -548,6 +609,10 @@ mod tests {
                 },
             ],
             ollama_base_url: "http://127.0.0.1:11434".to_owned(),
+            skills_dir: std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .parent()
+                .unwrap()
+                .join("skills"),
             telemetry: TelemetryConfig::default(),
         }
     }
@@ -623,6 +688,112 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn matched_skill_is_injected_and_traced_during_the_mock_chat_cycle() {
+        let client = Arc::new(MockChatClient::new(vec![
+            response(
+                None,
+                vec![tool_call(
+                    "skill-bash",
+                    "bash",
+                    json!({"command": "printf skill-tool-ok"}),
+                )],
+            ),
+            response(Some("The skill tool output was verified."), vec![]),
+        ]));
+        let agent = Agent::new_with_chat_client(
+            test_config(),
+            Arc::new(Mutex::new(TodoState::default())),
+            Arc::new(MockContextWindow),
+            client.clone(),
+        )
+        .unwrap();
+        let exporter = CapturingExporter::default();
+        let provider = SdkTracerProvider::builder()
+            .with_simple_exporter(exporter.clone())
+            .build();
+        let subscriber = tracing_subscriber::registry()
+            .with(tracing_opentelemetry::layer().with_tracer(provider.tracer("skill-test")));
+        let dispatch = tracing::Dispatch::new(subscriber);
+
+        async {
+            let parent = tracing::info_span!("parent_execution");
+            assert_eq!(
+                agent
+                    .run_prompt("Please run cargo test before reporting.")
+                    .instrument(parent)
+                    .await
+                    .unwrap(),
+                "The skill tool output was verified."
+            );
+        }
+        .with_subscriber(dispatch)
+        .await;
+        provider.force_flush().unwrap();
+
+        let requests = client.requests();
+        assert_eq!(requests.len(), 2);
+        let first_request = serde_json::to_value(&requests[0]).unwrap();
+        let system_prompt = first_request["messages"][0]["content"].as_str().unwrap();
+        assert!(system_prompt.contains("skills[1]{name,version,score}:"));
+        assert!(system_prompt.contains("\"rust-testing\",\"1.0.0\",0.500"));
+        assert!(system_prompt.contains("Do not claim tests ran unless you have their output."));
+
+        let second_request = serde_json::to_value(&requests[1]).unwrap();
+        assert!(
+            second_request["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|message| {
+                    message["role"] == "tool"
+                        && message["content"]
+                            .as_str()
+                            .is_some_and(|content| content.contains("skill-tool-ok"))
+                })
+        );
+
+        let spans = exporter.0.lock().unwrap().clone();
+        let by_span_id = spans
+            .iter()
+            .map(|span| (span.span_context.span_id(), span))
+            .collect::<std::collections::HashMap<_, _>>();
+        let root = spans
+            .iter()
+            .find(|span| span.name == "parent_execution")
+            .unwrap();
+        let agent_turns = spans
+            .iter()
+            .filter(|span| span.name == "agent.turn")
+            .collect::<Vec<_>>();
+        assert_eq!(agent_turns.len(), 2);
+        let skill_spans = spans
+            .iter()
+            .filter(|span| span.name == "skill.invocation")
+            .collect::<Vec<_>>();
+        assert_eq!(skill_spans.len(), 2);
+        for span in skill_spans {
+            assert_eq!(span.span_context.trace_id(), root.span_context.trace_id());
+            assert!(span.attributes.iter().any(|attribute| {
+                attribute.key.as_str() == "skill.name" && attribute.value.as_str() == "rust-testing"
+            }));
+            assert!(span.attributes.iter().any(|attribute| {
+                attribute.key.as_str() == "skill.version" && attribute.value.as_str() == "1.0.0"
+            }));
+            assert!(
+                span.attributes
+                    .iter()
+                    .any(|attribute| attribute.key.as_str() == "skill.duration_ms")
+            );
+            assert!(
+                agent_turns.iter().any(|agent_turn| {
+                    has_ancestor(&by_span_id, span, agent_turn.span_context.span_id())
+                }),
+                "Skill span is not nested under an agent.turn span"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn nested_subagents_use_mock_local_runtime_context_and_tool_permissions() {
         let client = Arc::new(MockChatClient::new(vec![
             response(
@@ -666,7 +837,8 @@ mod tests {
             Arc::new(Mutex::new(TodoState::default())),
             Arc::new(MockContextWindow),
             client.clone(),
-        );
+        )
+        .unwrap();
 
         let answer = agent
             .run_prompt("Please inspect and review this patch.")
@@ -774,7 +946,8 @@ mod tests {
             Arc::new(Mutex::new(TodoState::default())),
             Arc::new(MockContextWindow),
             client.clone(),
-        );
+        )
+        .unwrap();
 
         assert_eq!(
             agent.run_prompt("Inspect the patch.").await.unwrap(),
@@ -833,7 +1006,8 @@ mod tests {
             Arc::new(Mutex::new(TodoState::default())),
             Arc::new(MockContextWindow),
             client,
-        );
+        )
+        .unwrap();
         let exporter = CapturingExporter::default();
         let captured_span_names = Arc::new(Mutex::new(Vec::new()));
         let provider = SdkTracerProvider::builder()

@@ -1,5 +1,6 @@
 mod agent;
 mod context_window;
+mod skills;
 mod subagent;
 mod tools;
 mod types;
@@ -150,7 +151,7 @@ async fn run() -> Result<()> {
     let config = AgentRonConfig::load(&args.config)?;
     let provider = init_tracing(&config, args.verbose)?;
     let todo_state = Arc::new(Mutex::new(TodoState::default()));
-    let agent = Agent::new(config.clone(), todo_state);
+    let agent = Agent::new(config.clone(), todo_state)?;
 
     let result = if let Some(prompt) = args.prompt {
         run_prompt(&agent, &prompt).await

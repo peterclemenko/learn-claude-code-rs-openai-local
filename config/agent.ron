@@ -6,6 +6,7 @@ AgentRonConfig(
     system_prompt: "You are a helpful local coding assistant. Use the provided tools when needed. Tool inputs and outputs use TOON notation.",
     temperature: 0.1,
     max_turns: 8,
+    skills_dir: "../skills",
     allowed_tools: ["bash", "read_file", "todo_write", "delegate_task"],
     subagents: [
         SubagentConfig(

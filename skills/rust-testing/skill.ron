@@ -1,0 +1,9 @@
+(
+    schema_version: 1,
+    name: "rust-testing",
+    version: "1.0.0",
+    description: "Guidance for running and reporting Rust tests",
+    trigger_keywords: ["cargo test", "rust tests"],
+    instructions: "instructions.md",
+    required_tools: ["bash"],
+)

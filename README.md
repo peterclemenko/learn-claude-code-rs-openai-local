@@ -41,6 +41,14 @@ Each `max_depth` is an absolute nesting limit inherited by descendants; a child
 cannot delegate beyond the strictest limit in its ancestry.
 Subagent spans are nested under the delegating tool call and include delegation
 identity, task, model, depth, status, result size, and turn count.
+Skills are discovered from `skills_dir` in the RON agent configuration (a
+relative path is resolved from the config file's directory). Each skill
+directory contains a `skill.ron` manifest and a Markdown instruction file.
+Trigger keywords are screened against the latest user task, and only matching
+skills whose required tools are available are added to that turn's system
+context. Skill manifests include a schema version and tool dependencies; match
+scores are passed as TOON metadata and each injected skill has a nested
+OpenTelemetry span.
 Tool spans record duration, success, input/output bytes, and rough token
 estimates for every registered tool. Model request spans record exact
 prompt/completion/total tokens when the backend reports them, plus prompt
@@ -49,9 +57,9 @@ token counts are byte-based estimates, not tokenizer-exact counts. Configure
 `ollama_base_url` for Ollama; other runtimes can implement the shared
 `ContextWindowProvider` interface.
 
-Run `cargo test --workspace` to exercise local mock subagent delegation,
-tool permissions, RON/TOON serialization, and OpenTelemetry trace parenting
-without requiring a running LLM service.
+Run `cargo test --workspace` to exercise local mock skill injection and
+subagent delegation, tool permissions, RON/TOON serialization, and
+OpenTelemetry trace parenting without requiring a running LLM service.
 
 [^omnix]: If initializing manually, make sure to:
     - Change `name` in Cargo.toml.
