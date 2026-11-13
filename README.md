@@ -23,6 +23,11 @@ Enter `exit()` to quit. To send a single prompt without starting the REPL, run
 `cargo run -- --prompt "Your question"`.
 
 The agent settings are loaded from [`config/agent.ron`](./config/agent.ron).
+Context-compaction settings are loaded from [`config/compaction.ron`](./config/compaction.ron);
+use `--compaction-config` to select another file. When the estimated prompt size
+reaches the configured threshold, the harness summarizes older user turns with
+the configured local OpenAI-compatible model, preserving system instructions and
+the most recent turns. Token counts are approximate serialized-message estimates.
 The default endpoint is Ollama's OpenAI-compatible API at
 `http://localhost:11434/v1`; set `base_url` and `api_key` for another local
 server such as vLLM or llama.cpp. Tools advertise TOON signatures and exchange

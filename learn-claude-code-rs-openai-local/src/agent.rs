@@ -19,6 +19,7 @@ use async_trait::async_trait;
 use tracing::{Instrument, info, instrument, warn};
 
 use crate::{
+    compactor::{CompactionConfig, ContextCompactor},
     context_window::{ContextWindowProvider, OllamaContextWindowProvider},
     skills::SkillRegistry,
     subagent::DelegateTaskTool,
@@ -56,6 +57,7 @@ impl ChatCompletionClient for OpenAiChatCompletionClient {
 pub(crate) struct AgentRuntime {
     pub(crate) client: Arc<dyn ChatCompletionClient>,
     pub(crate) context_window_provider: Arc<dyn ContextWindowProvider>,
+    pub(crate) compaction_config: Arc<CompactionConfig>,
     pub(crate) subagents: Arc<Vec<SubagentConfig>>,
     pub(crate) skills: Arc<SkillRegistry>,
 }
@@ -66,6 +68,7 @@ pub struct Agent {
     tools: ToolRegistry,
     todo_state: Arc<Mutex<TodoState>>,
     context_window_provider: Arc<dyn ContextWindowProvider>,
+    compactor: ContextCompactor,
     skills: Arc<SkillRegistry>,
     allowed_tools: Vec<String>,
     depth: usize,
@@ -73,17 +76,14 @@ pub struct Agent {
 }
 
 impl Agent {
-    pub fn new(config: AgentRonConfig, todo_state: Arc<Mutex<TodoState>>) -> Result<Self> {
-        let context_window_provider =
-            Arc::new(OllamaContextWindowProvider::new(&config.ollama_base_url));
-        Self::new_with_context_window_provider(config, todo_state, context_window_provider)
-    }
-
-    pub fn new_with_context_window_provider(
+    pub fn new(
         config: AgentRonConfig,
         todo_state: Arc<Mutex<TodoState>>,
-        context_window_provider: Arc<dyn ContextWindowProvider>,
+        compaction_config: CompactionConfig,
     ) -> Result<Self> {
+        compaction_config.validate()?;
+        let context_window_provider =
+            Arc::new(OllamaContextWindowProvider::new(&config.ollama_base_url));
         let client = Arc::new(OpenAiChatCompletionClient {
             client: Client::with_config(
                 OpenAIConfig::new()
@@ -91,14 +91,37 @@ impl Agent {
                     .with_api_key(&config.api_key),
             ),
         });
-        Self::new_with_chat_client(config, todo_state, context_window_provider, client)
+        Self::new_with_chat_client_and_compaction(
+            config,
+            todo_state,
+            context_window_provider,
+            client,
+            compaction_config,
+        )
     }
 
+    #[cfg(test)]
     fn new_with_chat_client(
         config: AgentRonConfig,
         todo_state: Arc<Mutex<TodoState>>,
         context_window_provider: Arc<dyn ContextWindowProvider>,
         client: Arc<dyn ChatCompletionClient>,
+    ) -> Result<Self> {
+        Self::new_with_chat_client_and_compaction(
+            config,
+            todo_state,
+            context_window_provider,
+            client,
+            CompactionConfig::default(),
+        )
+    }
+
+    fn new_with_chat_client_and_compaction(
+        config: AgentRonConfig,
+        todo_state: Arc<Mutex<TodoState>>,
+        context_window_provider: Arc<dyn ContextWindowProvider>,
+        client: Arc<dyn ChatCompletionClient>,
+        compaction_config: CompactionConfig,
     ) -> Result<Self> {
         let skills = Arc::new(SkillRegistry::load_dir(&config.skills_dir)?);
         Ok(Self::new_with_runtime(
@@ -107,6 +130,7 @@ impl Agent {
             context_window_provider,
             client,
             skills,
+            compaction_config,
         ))
     }
 
@@ -116,10 +140,12 @@ impl Agent {
         context_window_provider: Arc<dyn ContextWindowProvider>,
         client: Arc<dyn ChatCompletionClient>,
         skills: Arc<SkillRegistry>,
+        compaction_config: CompactionConfig,
     ) -> Self {
         let runtime = AgentRuntime {
             client,
             context_window_provider,
+            compaction_config: Arc::new(compaction_config),
             subagents: Arc::new(config.subagents.clone()),
             skills,
         };
@@ -161,12 +187,18 @@ impl Agent {
             }
         }
 
+        let model = config.model.clone();
         Self {
             client: Arc::clone(&runtime.client),
             config,
             tools,
             todo_state,
             context_window_provider: runtime.context_window_provider,
+            compactor: ContextCompactor::new(
+                runtime.compaction_config.as_ref().clone(),
+                Arc::clone(&runtime.client),
+                model,
+            ),
             skills: runtime.skills,
             allowed_tools,
             depth,
@@ -203,6 +235,9 @@ impl Agent {
             let span = tracing::span!(tracing::Level::INFO, "agent.turn", turn);
             let outcome = async {
                 self.inject_dynamic_context(messages)?;
+                if let Some(snapshot) = self.compactor.compact_if_needed(messages).await? {
+                    info!(snapshot = %snapshot.render_toon(), "Compacted historical conversation context");
+                }
                 self.request_turn(messages).await
             }
             .instrument(span)

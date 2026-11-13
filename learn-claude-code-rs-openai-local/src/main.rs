@@ -1,4 +1,5 @@
 mod agent;
+mod compactor;
 mod context_window;
 mod skills;
 mod subagent;
@@ -25,6 +26,7 @@ use tracing_subscriber::{Layer, layer::SubscriberExt, util::SubscriberInitExt};
 
 use crate::{
     agent::Agent,
+    compactor::CompactionConfig,
     types::{AgentRonConfig, TodoState},
 };
 
@@ -34,6 +36,10 @@ struct Args {
     /// Path to the RON agent configuration
     #[arg(long, default_value = "config/agent.ron")]
     config: PathBuf,
+
+    /// Path to the RON context-compaction configuration
+    #[arg(long, default_value = "config/compaction.ron")]
+    compaction_config: PathBuf,
 
     /// Prompt to send without starting the interactive session
     #[arg(short, long)]
@@ -149,9 +155,10 @@ async fn run_repl(agent: &Agent, config: &AgentRonConfig) -> Result<()> {
 async fn run() -> Result<()> {
     let args = Args::parse();
     let config = AgentRonConfig::load(&args.config)?;
+    let compaction_config = CompactionConfig::load(&args.compaction_config)?;
     let provider = init_tracing(&config, args.verbose)?;
     let todo_state = Arc::new(Mutex::new(TodoState::default()));
-    let agent = Agent::new(config.clone(), todo_state)?;
+    let agent = Agent::new(config.clone(), todo_state, compaction_config)?;
 
     let result = if let Some(prompt) = args.prompt {
         run_prompt(&agent, &prompt).await

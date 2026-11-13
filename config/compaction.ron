@@ -1,0 +1,7 @@
+(
+    trigger_threshold_ratio: 0.80,
+    max_context_tokens: 16384,
+    protected_recent_turns: 4,
+    compaction_system_prompt: "Summarize the previous conversational turns concisely, retaining key technical decisions, completed code changes, file paths, active hypotheses, and user constraints. Preserve active task state and do not invent facts. Discard redundant back-and-forth chatter.",
+    target_summary_tokens: 1024,
+)
