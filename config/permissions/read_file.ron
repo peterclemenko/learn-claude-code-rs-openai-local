@@ -1,0 +1,12 @@
+ToolPermissionConfig(
+    tool_name: "read_file",
+    default_behavior: Allow,
+    safety_checks_enabled: false,
+    rules: [
+        PermissionRule(
+            action: Allow,
+            pattern: "*",
+            reason: "Read access is open by default.",
+        ),
+    ],
+)

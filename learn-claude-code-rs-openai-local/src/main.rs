@@ -1,8 +1,11 @@
 mod agent;
 mod compactor;
 mod context_window;
+mod permission;
 mod skills;
 mod subagent;
+#[cfg(test)]
+mod test_telemetry;
 mod tools;
 mod types;
 
@@ -138,6 +141,16 @@ async fn run_repl(agent: &Agent, config: &AgentRonConfig) -> Result<()> {
             .context("Failed to read prompt")?;
         if prompt.trim() == "exit()" {
             break;
+        }
+        if matches!(
+            prompt.split_whitespace().next(),
+            Some("/rules" | "/mode" | "/profile")
+        ) {
+            match agent.handle_permission_command(&prompt) {
+                Ok(output) => println!("{output}"),
+                Err(error) => eprintln!("{error:#}"),
+            }
+            continue;
         }
 
         messages.push(

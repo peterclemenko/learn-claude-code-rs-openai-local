@@ -10,6 +10,9 @@
     {
       devShells.default = pkgs.mkShell {
         name = "learn-claude-code-rs-openai-local-shell";
+        SSL_CERT_FILE = "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt";
+        NIX_SSL_CERT_FILE = "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt";
+        SSL_CERT_DIR = "${pkgs.cacert}/etc/ssl/certs";
         inputsFrom = [
           # Note: Removed self'.devShells.rust if it enforces a Nix rust toolchain,
           # keeping pre-commit hooks intact.
@@ -29,7 +32,7 @@
           export SSL_CERT_FILE="${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt"
           export SYSTEM_CERT_FILE="${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt"
           export NIX_SSL_CERT_FILE="${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt"
-          export SSL_CERT_DIR=""
+          export SSL_CERT_DIR="${pkgs.cacert}/etc/ssl/certs"
           export OTEL_SDK_DISABLED="''${OTEL_SDK_DISABLED:-true}"
 
           # Ensure user-level cargo bin (managed by rustup) is in PATH

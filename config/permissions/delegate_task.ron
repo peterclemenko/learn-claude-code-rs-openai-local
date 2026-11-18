@@ -1,0 +1,6 @@
+ToolPermissionConfig(
+    tool_name: "delegate_task",
+    default_behavior: Ask,
+    safety_checks_enabled: false,
+    rules: [],
+)

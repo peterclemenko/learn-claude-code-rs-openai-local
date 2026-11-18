@@ -2,14 +2,21 @@ mod bash;
 mod file;
 mod todo;
 
-use std::{collections::BTreeMap, sync::Arc, time::Instant};
+use std::{
+    collections::BTreeMap,
+    sync::{Arc, Mutex},
+    time::Instant,
+};
 
 use anyhow::Result;
 use async_openai::types::chat::{ChatCompletionTool, ChatCompletionTools, FunctionObject};
 use async_trait::async_trait;
 use tracing::{Instrument, error, info, instrument};
 
-use crate::types::toon_table;
+use crate::{
+    permission::{PermissionBehavior, PermissionManager},
+    types::toon_table,
+};
 
 pub use bash::BashTool;
 pub use file::ReadFileTool;
@@ -45,14 +52,25 @@ fn estimated_tokens(bytes: usize) -> usize {
     bytes.div_ceil(4)
 }
 
-#[derive(Default)]
 pub struct ToolRegistry {
     tools: BTreeMap<&'static str, Arc<dyn ToonTool>>,
+    permissions: Option<Arc<Mutex<PermissionManager>>>,
 }
 
 impl ToolRegistry {
+    #[cfg(test)]
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            tools: BTreeMap::new(),
+            permissions: None,
+        }
+    }
+
+    pub(crate) fn with_permissions(permissions: Arc<Mutex<PermissionManager>>) -> Self {
+        Self {
+            tools: BTreeMap::new(),
+            permissions: Some(permissions),
+        }
     }
 
     pub fn register(&mut self, tool: impl ToonTool + 'static) {
@@ -91,6 +109,29 @@ impl ToolRegistry {
             .get(name)
             .with_context(|| format!("Unknown tool '{name}'"))?;
 
+        let (allowed, denial_reason) = if let Some(permissions) = &self.permissions {
+            let mut permissions = permissions.lock().map_err(|error| {
+                anyhow::anyhow!("Permission manager mutex is poisoned: {error}")
+            })?;
+            let (behavior, reason) = permissions.check(name, payload);
+            match behavior {
+                PermissionBehavior::Allow => (true, None),
+                PermissionBehavior::Deny => {
+                    info!(tool = name, reason = %reason, "Tool call denied by permission rules");
+                    (false, Some(reason))
+                }
+                PermissionBehavior::Ask => {
+                    let allowed = permissions.ask_user(name, payload)?;
+                    if !allowed {
+                        info!(tool = name, "Tool call denied by user");
+                    }
+                    (allowed, (!allowed).then(|| "Denied by user".to_owned()))
+                }
+            }
+        } else {
+            (true, None)
+        };
+
         let input_bytes = payload.len();
         let span = tracing::info_span!(
             "tool.execution",
@@ -103,14 +144,21 @@ impl ToolRegistry {
             succeeded = tracing::field::Empty,
         );
         let started_at = Instant::now();
-        let result = tool.execute(payload).instrument(span.clone()).await;
+        let result = if allowed {
+            tool.execute(payload).instrument(span.clone()).await
+        } else {
+            Ok(format!(
+                "Permission denied for tool '{name}': {}",
+                denial_reason.unwrap_or_else(|| "No reason provided".to_owned())
+            ))
+        };
         let duration_ms = started_at
             .elapsed()
             .as_millis()
             .try_into()
             .unwrap_or(u64::MAX);
         let (output, succeeded) = match result {
-            Ok(output) => (output, true),
+            Ok(output) => (output, allowed),
             Err(tool_error) => {
                 error!(parent: &span, tool = name, error = %tool_error, "Tool execution failed");
                 (
@@ -167,7 +215,7 @@ mod tests {
     use tracing_subscriber::{Layer, layer::Context, prelude::*};
 
     use super::{BashTool, ReadFileTool, TodoTool, ToolExecutionMetrics, ToolRegistry, ToonTool};
-    use crate::types::TodoState;
+    use crate::{permission::PermissionManager, types::TodoState};
 
     fn assert_usage(metrics: &ToolExecutionMetrics, name: &str, input: &str, output: &str) {
         assert_eq!(metrics.tool, name);
@@ -216,6 +264,39 @@ mod tests {
         let registry = ToolRegistry::new();
         let result = registry.dispatch("missing", "").await;
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn permission_denial_prevents_tool_execution() {
+        crate::test_telemetry::run_async_test_case(
+            "tools::tests::permission_denial_prevents_tool_execution",
+            async {
+                let permissions_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .parent()
+                    .unwrap()
+                    .join("config/permissions");
+                let permissions = Arc::new(Mutex::new(
+                    PermissionManager::load(permissions_dir).unwrap(),
+                ));
+                permissions
+                    .lock()
+                    .unwrap()
+                    .handle_command("/profile strict")
+                    .unwrap();
+                let mut registry = ToolRegistry::with_permissions(permissions);
+                registry.register(BashTool);
+
+                let execution = registry
+                    .dispatch_with_metrics("bash", r#"{"command":"printf 'should-not-run'"}"#)
+                    .await
+                    .unwrap();
+
+                assert!(execution.output.contains("Permission denied"));
+                assert!(!execution.output.contains("should-not-run"));
+                assert!(!execution.metrics.succeeded);
+            },
+        )
+        .await;
     }
 
     #[tokio::test]

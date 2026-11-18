@@ -1,0 +1,6 @@
+ToolPermissionConfig(
+    tool_name: "todo_write",
+    default_behavior: Allow,
+    safety_checks_enabled: false,
+    rules: [],
+)

@@ -1,0 +1,17 @@
+ToolPermissionConfig(
+    tool_name: "bash",
+    default_behavior: Ask,
+    safety_checks_enabled: true,
+    rules: [
+        PermissionRule(
+            action: Deny,
+            pattern: "rm -rf /",
+            reason: "Destructive root deletion is strictly prohibited.",
+        ),
+        PermissionRule(
+            action: Deny,
+            pattern: "sudo *",
+            reason: "Privileged execution is not allowed via the agent.",
+        ),
+    ],
+)

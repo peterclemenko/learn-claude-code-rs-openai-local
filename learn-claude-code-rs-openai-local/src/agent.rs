@@ -21,6 +21,7 @@ use tracing::{Instrument, info, instrument, warn};
 use crate::{
     compactor::{CompactionConfig, ContextCompactor},
     context_window::{ContextWindowProvider, OllamaContextWindowProvider},
+    permission::PermissionManager,
     skills::SkillRegistry,
     subagent::DelegateTaskTool,
     tools::{BashTool, ReadFileTool, TodoTool, ToolRegistry},
@@ -60,6 +61,7 @@ pub(crate) struct AgentRuntime {
     pub(crate) compaction_config: Arc<CompactionConfig>,
     pub(crate) subagents: Arc<Vec<SubagentConfig>>,
     pub(crate) skills: Arc<SkillRegistry>,
+    pub(crate) permissions: Arc<Mutex<PermissionManager>>,
 }
 
 pub struct Agent {
@@ -70,6 +72,7 @@ pub struct Agent {
     context_window_provider: Arc<dyn ContextWindowProvider>,
     compactor: ContextCompactor,
     skills: Arc<SkillRegistry>,
+    permissions: Arc<Mutex<PermissionManager>>,
     allowed_tools: Vec<String>,
     depth: usize,
     turns_completed: AtomicUsize,
@@ -97,6 +100,7 @@ impl Agent {
             context_window_provider,
             client,
             compaction_config,
+            Arc::new(Mutex::new(PermissionManager::load("config/permissions")?)),
         )
     }
 
@@ -113,6 +117,7 @@ impl Agent {
             context_window_provider,
             client,
             CompactionConfig::default(),
+            Arc::new(Mutex::new(PermissionManager::allow_all_for_tests())),
         )
     }
 
@@ -122,6 +127,7 @@ impl Agent {
         context_window_provider: Arc<dyn ContextWindowProvider>,
         client: Arc<dyn ChatCompletionClient>,
         compaction_config: CompactionConfig,
+        permissions: Arc<Mutex<PermissionManager>>,
     ) -> Result<Self> {
         let skills = Arc::new(SkillRegistry::load_dir(&config.skills_dir)?);
         Ok(Self::new_with_runtime(
@@ -131,6 +137,7 @@ impl Agent {
             client,
             skills,
             compaction_config,
+            permissions,
         ))
     }
 
@@ -141,6 +148,7 @@ impl Agent {
         client: Arc<dyn ChatCompletionClient>,
         skills: Arc<SkillRegistry>,
         compaction_config: CompactionConfig,
+        permissions: Arc<Mutex<PermissionManager>>,
     ) -> Self {
         let runtime = AgentRuntime {
             client,
@@ -148,6 +156,7 @@ impl Agent {
             compaction_config: Arc::new(compaction_config),
             subagents: Arc::new(config.subagents.clone()),
             skills,
+            permissions,
         };
         let allowed_tools = config.allowed_tools.clone();
         Self::from_runtime(config, todo_state, runtime, 0, None, allowed_tools)
@@ -161,7 +170,7 @@ impl Agent {
         depth_limit: Option<usize>,
         allowed_tools: Vec<String>,
     ) -> Self {
-        let mut tools = ToolRegistry::new();
+        let mut tools = ToolRegistry::with_permissions(Arc::clone(&runtime.permissions));
         for tool in &allowed_tools {
             match tool.as_str() {
                 "bash" => tools.register(BashTool),
@@ -200,6 +209,7 @@ impl Agent {
                 model,
             ),
             skills: runtime.skills,
+            permissions: runtime.permissions,
             allowed_tools,
             depth,
             turns_completed: AtomicUsize::new(0),
@@ -208,6 +218,13 @@ impl Agent {
 
     pub(crate) fn turns_completed(&self) -> usize {
         self.turns_completed.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn handle_permission_command(&self, command: &str) -> Result<String> {
+        self.permissions
+            .lock()
+            .map_err(|error| anyhow::anyhow!("Permission manager mutex is poisoned: {error}"))?
+            .handle_command(command)
     }
 
     #[instrument(name = "agent.prompt", skip(self, prompt))]

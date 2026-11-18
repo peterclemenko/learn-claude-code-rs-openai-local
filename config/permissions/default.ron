@@ -1,0 +1,5 @@
+(
+    fallback_mode: Default,
+    active_profile: None,
+    persist_always_allow: true,
+)

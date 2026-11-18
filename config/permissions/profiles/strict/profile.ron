@@ -1,0 +1,6 @@
+ProfileConfig(
+    name: "strict",
+    description: "Maximum security profile denying shell operations and allowing read-only planning.",
+    fallback_mode: Plan,
+    enforce_strict_bash_checks: true,
+)

@@ -64,9 +64,23 @@ token counts are byte-based estimates, not tokenizer-exact counts. Configure
 `ollama_base_url` for Ollama; other runtimes can implement the shared
 `ContextWindowProvider` interface.
 
+Tool execution is gated by RON permission files in
+[`config/permissions/`](./config/permissions/). `/rules` prints the active
+rules, `/mode <default|plan|auto>` changes the fallback mode, and
+`/profile <name>` loads profile overrides from
+`config/permissions/profiles/<name>/`. Set `active_profile: Some("strict")` in
+`default.ron` to activate a profile on startup. The checked-in `strict` profile
+uses plan mode and enables strict bash checks. Choosing "always allow this
+tool" at a permission prompt adds a wildcard allow rule to the active profile;
+without a profile the allow applies only for the current process.
+
 Run `cargo test --workspace` to exercise local mock skill injection and
 subagent delegation, tool permissions, RON/TOON serialization, and
 OpenTelemetry trace parenting without requiring a running LLM service.
+Permission profile tests emit test name, pass/fail status, and duration as
+OpenTelemetry spans to the configured OTLP endpoint. `just test-all` enables
+`--nocapture` so tracing output is also visible in the CLI; tests do not export
+full stdout or stderr.
 
 [^omnix]: If initializing manually, make sure to:
     - Change `name` in Cargo.toml.
