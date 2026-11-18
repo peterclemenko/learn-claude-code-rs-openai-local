@@ -235,10 +235,15 @@ impl Agent {
             let span = tracing::span!(tracing::Level::INFO, "agent.turn", turn);
             let outcome = async {
                 self.inject_dynamic_context(messages)?;
-                if let Some(snapshot) = self.compactor.compact_if_needed(messages).await? {
+                let context_window_tokens = self.active_context_window_tokens().await;
+                if let Some(snapshot) = self
+                    .compactor
+                    .compact_if_needed(messages, context_window_tokens)
+                    .await?
+                {
                     info!(snapshot = %snapshot.render_toon(), "Compacted historical conversation context");
                 }
-                self.request_turn(messages).await
+                self.request_turn(messages, context_window_tokens).await
             }
             .instrument(span)
             .await?;
@@ -299,6 +304,33 @@ impl Agent {
         Ok(())
     }
 
+    async fn active_context_window_tokens(&self) -> Option<u64> {
+        match self
+            .context_window_provider
+            .context_window_tokens(&self.config.model)
+            .await
+        {
+            Ok(Some(context_window)) => Some(context_window),
+            Ok(None) => {
+                warn!(
+                    model = %self.config.model,
+                    context_window_provider = self.context_window_provider.provider_name(),
+                    "Context window is unavailable for the active model; using configured compaction limit"
+                );
+                None
+            }
+            Err(error) => {
+                warn!(
+                    model = %self.config.model,
+                    context_window_provider = self.context_window_provider.provider_name(),
+                    error = %error,
+                    "Could not retrieve the active model context window; using configured compaction limit"
+                );
+                None
+            }
+        }
+    }
+
     #[instrument(
         name = "agent.request_turn",
         skip(self, messages),
@@ -315,6 +347,7 @@ impl Agent {
     async fn request_turn(
         &self,
         messages: &mut Vec<ChatCompletionRequestMessage>,
+        context_window_tokens: Option<u64>,
     ) -> Result<TurnOutcome> {
         let request = CreateChatCompletionRequestArgs::default()
             .model(&self.config.model)
@@ -333,30 +366,6 @@ impl Agent {
             ))
             .await
             .context("Local OpenAI-compatible chat completion request failed")?;
-        let context_window_tokens = match self
-            .context_window_provider
-            .context_window_tokens(&self.config.model)
-            .await
-        {
-            Ok(Some(context_window)) => Some(context_window),
-            Ok(None) => {
-                warn!(
-                    model = %self.config.model,
-                    context_window_provider = self.context_window_provider.provider_name(),
-                    "Context window is unavailable for the active model"
-                );
-                None
-            }
-            Err(error) => {
-                warn!(
-                    model = %self.config.model,
-                    context_window_provider = self.context_window_provider.provider_name(),
-                    error = %error,
-                    "Could not retrieve the active model context window"
-                );
-                None
-            }
-        };
         match response.usage.as_ref() {
             Some(usage) => {
                 let metrics = model_usage_metrics(usage, context_window_tokens);
@@ -509,7 +518,8 @@ mod tests {
 
     use anyhow::{Context, Result};
     use async_openai::types::chat::{
-        CompletionUsage, CreateChatCompletionRequest, CreateChatCompletionResponse,
+        ChatCompletionRequestMessage, CompletionUsage, CreateChatCompletionRequest,
+        CreateChatCompletionResponse,
     };
     use async_trait::async_trait;
     use opentelemetry::trace::TracerProvider as _;
@@ -524,6 +534,7 @@ mod tests {
 
     use super::{Agent, ChatCompletionClient, context_window_utilization, model_usage_metrics};
     use crate::{
+        compactor::CompactionConfig,
         context_window::ContextWindowProvider,
         types::{AgentRonConfig, SubagentConfig, TelemetryConfig, TodoState},
     };
@@ -562,7 +573,9 @@ mod tests {
         }
     }
 
-    struct MockContextWindow;
+    struct MockContextWindow {
+        context_window_tokens: u64,
+    }
 
     #[derive(Clone, Debug, Default)]
     struct CapturingExporter(Arc<Mutex<Vec<SpanData>>>);
@@ -603,7 +616,7 @@ mod tests {
         }
 
         async fn context_window_tokens(&self, _model: &str) -> Result<Option<u64>> {
-            Ok(Some(16_384))
+            Ok(Some(self.context_window_tokens))
         }
     }
 
@@ -676,6 +689,62 @@ mod tests {
         .unwrap()
     }
 
+    #[tokio::test]
+    async fn run_turns_compacts_using_the_active_runtime_context_window() {
+        let client = Arc::new(MockChatClient::new(vec![
+            response(Some("Summarized older context."), vec![]),
+            response(Some("Finished with compacted context."), vec![]),
+        ]));
+        let agent = Agent::new_with_chat_client_and_compaction(
+            test_config(),
+            Arc::new(Mutex::new(TodoState::default())),
+            Arc::new(MockContextWindow {
+                context_window_tokens: 100,
+            }),
+            client.clone(),
+            CompactionConfig {
+                trigger_threshold_ratio: 0.8,
+                max_context_tokens: 100_000,
+                protected_recent_turns: 1,
+                compaction_system_prompt: "Summarize prior context.".to_owned(),
+                target_summary_tokens: 32,
+            },
+        )
+        .unwrap();
+        let mut messages: Vec<ChatCompletionRequestMessage> = serde_json::from_value(json!([
+            {"role": "system", "content": "Keep these instructions."},
+            {"role": "user", "content": "Older question ".repeat(100)},
+            {"role": "assistant", "content": "Older answer ".repeat(100)},
+            {"role": "user", "content": "Latest question"}
+        ]))
+        .unwrap();
+
+        assert_eq!(
+            agent.run_turns(&mut messages).await.unwrap(),
+            "Finished with compacted context."
+        );
+        let requests = client.requests();
+        assert_eq!(
+            requests.len(),
+            2,
+            "one summary request and one agent request"
+        );
+        assert!(requests[1].messages.iter().any(|message| matches!(
+            message,
+            ChatCompletionRequestMessage::System(system)
+                if system.name.as_deref() == Some("context_compactor")
+        )));
+        assert!(requests[1].messages.iter().any(|message| matches!(
+            message,
+            ChatCompletionRequestMessage::User(user)
+                if matches!(
+                    &user.content,
+                    async_openai::types::chat::ChatCompletionRequestUserMessageContent::Text(content)
+                        if content == "Latest question"
+                )
+        )));
+    }
+
     fn tool_call(id: &str, name: &str, arguments: Value) -> Value {
         json!({
             "id": id,
@@ -738,7 +807,9 @@ mod tests {
         let agent = Agent::new_with_chat_client(
             test_config(),
             Arc::new(Mutex::new(TodoState::default())),
-            Arc::new(MockContextWindow),
+            Arc::new(MockContextWindow {
+                context_window_tokens: 16_384,
+            }),
             client.clone(),
         )
         .unwrap();
@@ -870,7 +941,9 @@ mod tests {
         let agent = Agent::new_with_chat_client(
             test_config(),
             Arc::new(Mutex::new(TodoState::default())),
-            Arc::new(MockContextWindow),
+            Arc::new(MockContextWindow {
+                context_window_tokens: 16_384,
+            }),
             client.clone(),
         )
         .unwrap();
@@ -979,7 +1052,9 @@ mod tests {
         let agent = Agent::new_with_chat_client(
             config,
             Arc::new(Mutex::new(TodoState::default())),
-            Arc::new(MockContextWindow),
+            Arc::new(MockContextWindow {
+                context_window_tokens: 16_384,
+            }),
             client.clone(),
         )
         .unwrap();
@@ -1039,7 +1114,9 @@ mod tests {
         let agent = Agent::new_with_chat_client(
             test_config(),
             Arc::new(Mutex::new(TodoState::default())),
-            Arc::new(MockContextWindow),
+            Arc::new(MockContextWindow {
+                context_window_tokens: 16_384,
+            }),
             client,
         )
         .unwrap();

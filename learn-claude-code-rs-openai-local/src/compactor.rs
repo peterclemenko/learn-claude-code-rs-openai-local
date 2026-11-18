@@ -138,11 +138,16 @@ impl ContextCompactor {
     pub(crate) async fn compact_if_needed(
         &self,
         messages: &mut Vec<ChatCompletionRequestMessage>,
+        context_window_tokens: Option<u64>,
     ) -> Result<Option<CompactionStateSnapshot>> {
         let original_tokens = Self::estimate_tokens(messages)?;
-        let threshold = (self.config.max_context_tokens as f64
-            * f64::from(self.config.trigger_threshold_ratio))
-        .ceil() as usize;
+        let max_context_tokens = context_window_tokens
+            .filter(|tokens| *tokens > 0)
+            .map_or(self.config.max_context_tokens as f64, |tokens| {
+                tokens as f64
+            });
+        let threshold =
+            (max_context_tokens * f64::from(self.config.trigger_threshold_ratio)).ceil() as usize;
         if original_tokens < threshold {
             return Ok(None);
         }
@@ -352,7 +357,7 @@ mod tests {
         ];
 
         let snapshot = compactor
-            .compact_if_needed(&mut messages)
+            .compact_if_needed(&mut messages, None)
             .await
             .unwrap()
             .unwrap();
@@ -395,7 +400,7 @@ mod tests {
         messages.push(message("user", "follow-up question"));
         messages.push(message("assistant", "follow-up answer"));
         compactor
-            .compact_if_needed(&mut messages)
+            .compact_if_needed(&mut messages, None)
             .await
             .unwrap()
             .unwrap();
@@ -434,7 +439,7 @@ mod tests {
 
         assert!(
             compactor
-                .compact_if_needed(&mut messages)
+                .compact_if_needed(&mut messages, None)
                 .await
                 .unwrap()
                 .is_none()
@@ -453,12 +458,55 @@ mod tests {
         );
         assert!(
             triggered_compactor
-                .compact_if_needed(&mut messages)
+                .compact_if_needed(&mut messages, None)
                 .await
                 .unwrap()
                 .is_none()
         );
         assert!(client.requests().is_empty());
+    }
+
+    #[tokio::test]
+    async fn uses_active_context_window_instead_of_larger_configured_fallback() {
+        let client = Arc::new(MockChatClient::new(vec![response("important history")]));
+        let compactor = ContextCompactor::new(
+            CompactionConfig {
+                trigger_threshold_ratio: 0.8,
+                max_context_tokens: 100_000,
+                ..config()
+            },
+            client.clone(),
+            "local-model",
+        );
+        let mut messages = vec![
+            message("system", "Keep these instructions."),
+            message("user", &"older question ".repeat(100)),
+            message("assistant", &"older answer ".repeat(100)),
+            message("user", "latest question"),
+        ];
+
+        assert!(
+            compactor
+                .compact_if_needed(&mut messages, Some(100))
+                .await
+                .unwrap()
+                .is_some()
+        );
+        assert_eq!(client.requests().len(), 1);
+        assert!(messages.iter().any(|message| matches!(
+            message,
+            async_openai::types::chat::ChatCompletionRequestMessage::System(system)
+                if system.name.as_deref() == Some(SUMMARY_NAME)
+        )));
+        assert!(messages.iter().any(|message| matches!(
+            message,
+            async_openai::types::chat::ChatCompletionRequestMessage::User(user)
+                if matches!(
+                    &user.content,
+                    async_openai::types::chat::ChatCompletionRequestUserMessageContent::Text(content)
+                        if content == "latest question"
+                )
+        )));
     }
 
     #[test]

@@ -27,7 +27,9 @@ Context-compaction settings are loaded from [`config/compaction.ron`](./config/c
 use `--compaction-config` to select another file. When the estimated prompt size
 reaches the configured threshold, the harness summarizes older user turns with
 the configured local OpenAI-compatible model, preserving system instructions and
-the most recent turns. Token counts are approximate serialized-message estimates.
+the most recent turns. The active runtime context window is used when available;
+`max_context_tokens` in the RON file is the fallback. Token counts are approximate
+serialized-message estimates.
 The default endpoint is Ollama's OpenAI-compatible API at
 `http://localhost:11434/v1`; set `base_url` and `api_key` for another local
 server such as vLLM or llama.cpp. Tools advertise TOON signatures and exchange
