@@ -123,7 +123,7 @@ pub struct SubagentConfig {
 }
 
 fn default_agent_tools() -> Vec<String> {
-    ["bash", "read_file", "todo_write"]
+    ["bash", "read_file", "todo_write", "memory"]
         .into_iter()
         .map(str::to_owned)
         .collect()
@@ -241,7 +241,7 @@ fn validate_tool_names(tools: &[String], owner: &str) -> Result<()> {
     for tool in tools {
         if !matches!(
             tool.as_str(),
-            "bash" | "read_file" | "todo_write" | "delegate_task"
+            "bash" | "read_file" | "todo_write" | "delegate_task" | "memory"
         ) {
             bail!("{owner} declares unknown tool '{tool}'");
         }

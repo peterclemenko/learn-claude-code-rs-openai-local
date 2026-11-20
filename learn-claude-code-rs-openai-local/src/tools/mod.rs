@@ -1,5 +1,6 @@
 mod bash;
 mod file;
+mod memory;
 mod todo;
 
 use std::{
@@ -21,6 +22,7 @@ use crate::{
 
 pub use bash::BashTool;
 pub use file::ReadFileTool;
+pub use memory::MemoryTool;
 pub use todo::TodoTool;
 
 #[async_trait]

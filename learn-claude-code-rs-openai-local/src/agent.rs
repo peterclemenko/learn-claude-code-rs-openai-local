@@ -19,10 +19,13 @@ use async_openai::{
 use async_trait::async_trait;
 use tracing::{Instrument, info, instrument, warn};
 
+#[cfg(test)]
+use crate::memory::NoopMemoryBackend;
 use crate::{
     compactor::{CompactionConfig, ContextCompactor},
     context_window::{ContextWindowProvider, OllamaContextWindowProvider},
     hooks::{HookConfig, HookContext, HookDecision, HookDispatcher, HookEvent},
+    memory::{MemoryBackend, MemoryQuery, build_memory_from_config, config::MemorySystemConfig},
     permission::PermissionManager,
     skills::SkillRegistry,
     subagent::DelegateTaskTool,
@@ -65,6 +68,7 @@ pub(crate) struct AgentRuntime {
     pub(crate) skills: Arc<SkillRegistry>,
     pub(crate) permissions: Arc<Mutex<PermissionManager>>,
     pub(crate) hooks: Arc<HookDispatcher>,
+    pub(crate) memory: Arc<dyn MemoryBackend>,
 }
 
 pub struct Agent {
@@ -80,6 +84,7 @@ pub struct Agent {
     depth: usize,
     turns_completed: AtomicUsize,
     hooks: Arc<HookDispatcher>,
+    memory: Arc<dyn MemoryBackend>,
 }
 
 impl Agent {
@@ -89,6 +94,8 @@ impl Agent {
         compaction_config: CompactionConfig,
     ) -> Result<Self> {
         compaction_config.validate()?;
+        let memory_config = MemorySystemConfig::load_or_default("config/memory.ron")?;
+        let memory = build_memory_from_config(&memory_config)?;
         let context_window_provider =
             Arc::new(OllamaContextWindowProvider::new(&config.ollama_base_url));
         let client = Arc::new(OpenAiChatCompletionClient {
@@ -105,6 +112,7 @@ impl Agent {
             client,
             compaction_config,
             Arc::new(Mutex::new(PermissionManager::load("config/permissions")?)),
+            memory,
         )
     }
 
@@ -122,6 +130,7 @@ impl Agent {
             client,
             CompactionConfig::default(),
             Arc::new(Mutex::new(PermissionManager::allow_all_for_tests())),
+            Arc::new(NoopMemoryBackend),
         )
     }
 
@@ -132,6 +141,7 @@ impl Agent {
         client: Arc<dyn ChatCompletionClient>,
         compaction_config: CompactionConfig,
         permissions: Arc<Mutex<PermissionManager>>,
+        memory: Arc<dyn MemoryBackend>,
     ) -> Result<Self> {
         let skills = Arc::new(SkillRegistry::load_dir(&config.skills_dir)?);
         Ok(Self::new_with_runtime(
@@ -142,6 +152,7 @@ impl Agent {
             skills,
             compaction_config,
             permissions,
+            memory,
         ))
     }
 
@@ -153,6 +164,7 @@ impl Agent {
         skills: Arc<SkillRegistry>,
         compaction_config: CompactionConfig,
         permissions: Arc<Mutex<PermissionManager>>,
+        memory: Arc<dyn MemoryBackend>,
     ) -> Self {
         let hooks = if Path::new("config/hooks.ron").exists() {
             HookConfig::load("config/hooks.ron")
@@ -172,6 +184,7 @@ impl Agent {
             skills,
             permissions,
             hooks: Arc::new(hooks),
+            memory,
         };
         let allowed_tools = config.allowed_tools.clone();
         Self::from_runtime(config, todo_state, runtime, 0, None, allowed_tools)
@@ -194,6 +207,9 @@ impl Agent {
                 "bash" => tools.register(BashTool),
                 "read_file" => tools.register(ReadFileTool),
                 "todo_write" => tools.register(TodoTool::new(Arc::clone(&todo_state))),
+                "memory" => {
+                    tools.register(crate::tools::MemoryTool::new(Arc::clone(&runtime.memory)))
+                }
                 "delegate_task" if !runtime.subagents.is_empty() => {
                     tools.register(DelegateTaskTool::new(
                         config.clone(),
@@ -232,6 +248,7 @@ impl Agent {
             depth,
             turns_completed: AtomicUsize::new(0),
             hooks: Arc::clone(&runtime.hooks),
+            memory: Arc::clone(&runtime.memory),
         }
     }
 
@@ -301,7 +318,7 @@ impl Agent {
         for turn in 1..=self.config.max_turns {
             let span = tracing::span!(tracing::Level::INFO, "agent.turn", turn);
             let outcome = async {
-                self.inject_dynamic_context(messages)?;
+                self.inject_dynamic_context(messages).await?;
                 let context_window_tokens = self.active_context_window_tokens().await;
                 if let Some(snapshot) = self
                     .compactor
@@ -336,7 +353,7 @@ impl Agent {
         )
     }
 
-    fn inject_dynamic_context(
+    async fn inject_dynamic_context(
         &self,
         messages: &mut Vec<ChatCompletionRequestMessage>,
     ) -> Result<()> {
@@ -347,10 +364,30 @@ impl Agent {
             .render_toon_context();
         let task = latest_user_text(messages)?;
         let skill_context = self.skills.render_context(&task, &self.allowed_tools);
+        let recalled = self
+            .memory
+            .recall(MemoryQuery {
+                text: task,
+                ..Default::default()
+            })
+            .await
+            .context("Failed to recall relevant memory")?;
+        let memory_context = if recalled.records.is_empty() {
+            String::new()
+        } else {
+            self.memory
+                .format_for_context(&recalled)
+                .await
+                .context("Failed to format recalled memory context")?
+        };
         let mut system_prompt = format!(
             "{}\n\nActive TODO task state (TOON):\n{}",
             self.config.system_prompt, todo_context
         );
+        if !memory_context.is_empty() {
+            system_prompt.push_str("\n\nRelevant durable memories (TOON):\n");
+            system_prompt.push_str(&memory_context);
+        }
         if !skill_context.is_empty() {
             system_prompt.push_str("\n\nRelevant skill instructions:\n");
             system_prompt.push_str(&skill_context);
@@ -604,6 +641,7 @@ mod tests {
     use crate::{
         compactor::CompactionConfig,
         context_window::ContextWindowProvider,
+        memory::NoopMemoryBackend,
         types::{AgentRonConfig, SubagentConfig, TelemetryConfig, TodoState},
     };
 
@@ -778,6 +816,7 @@ mod tests {
                 target_summary_tokens: 32,
             },
             Arc::new(Mutex::new(PermissionManager::allow_all_for_tests())),
+            Arc::new(NoopMemoryBackend),
         )
         .unwrap();
         let mut messages: Vec<ChatCompletionRequestMessage> = serde_json::from_value(json!([
@@ -812,6 +851,59 @@ mod tests {
                         if content == "Latest question"
                 )
         )));
+    }
+
+    #[tokio::test]
+    async fn agent_injects_recalled_memory_as_toon_system_context() {
+        use crate::memory::{
+            MemoryBackend, MemoryCategory, MemoryEntry, NaiveMemorySystem,
+            config::MemorySystemConfig,
+        };
+
+        let mut memory_config = MemorySystemConfig::default();
+        memory_config.storage_dir = std::env::temp_dir().join(format!(
+            "agent-memory-context-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let memory = Arc::new(NaiveMemorySystem::open(&memory_config).unwrap());
+        memory
+            .remember(MemoryEntry {
+                category: MemoryCategory::Preference,
+                content: "Use concise Rust examples".to_owned(),
+                tags: vec!["style".to_owned()],
+                scope: None,
+                metadata: Default::default(),
+            })
+            .await
+            .unwrap();
+
+        let agent = Agent::new_with_chat_client_and_compaction(
+            test_config(),
+            Arc::new(Mutex::new(TodoState::default())),
+            Arc::new(MockContextWindow {
+                context_window_tokens: 100,
+            }),
+            Arc::new(MockChatClient::default()),
+            CompactionConfig::default(),
+            Arc::new(Mutex::new(PermissionManager::allow_all_for_tests())),
+            memory,
+        )
+        .unwrap();
+        let mut messages: Vec<ChatCompletionRequestMessage> =
+            serde_json::from_value(json!([{"role":"user","content":"Rust examples"}])).unwrap();
+        agent.inject_dynamic_context(&mut messages).await.unwrap();
+        let system_message = serde_json::to_string(&messages[0]).unwrap();
+        assert!(system_message.contains("Relevant durable memories (TOON)"));
+        assert!(system_message.contains("Use concise Rust examples"));
+
+        drop(agent);
+        tokio::fs::remove_dir_all(memory_config.storage_dir)
+            .await
+            .unwrap();
     }
 
     fn tool_call(id: &str, name: &str, arguments: Value) -> Value {

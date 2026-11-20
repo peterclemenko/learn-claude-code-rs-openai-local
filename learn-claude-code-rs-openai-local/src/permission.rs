@@ -160,7 +160,7 @@ impl PermissionManager {
 
     #[cfg(test)]
     pub(crate) fn allow_all_for_tests() -> Self {
-        let tool_configs = ["bash", "read_file", "todo_write", "delegate_task"]
+        let tool_configs = ["bash", "read_file", "todo_write", "delegate_task", "memory"]
             .into_iter()
             .map(|tool_name| {
                 (
@@ -684,6 +684,24 @@ mod tests {
                 assert_eq!(
                     manager.check("bash", "bash[1]{command}:\nrm -rf /").0,
                     PermissionBehavior::Deny
+                );
+            },
+        );
+    }
+
+    #[test]
+    fn memory_tool_uses_ask_permission_by_default() {
+        crate::test_telemetry::run_test_case(
+            "permission::tests::memory_tool_uses_ask_permission_by_default",
+            || {
+                let permissions_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .parent()
+                    .unwrap()
+                    .join("config/permissions");
+                let manager = PermissionManager::load(permissions_path).unwrap();
+                assert_eq!(
+                    manager.check("memory", r#"{"action":"remember"}"#).0,
+                    PermissionBehavior::Ask
                 );
             },
         );

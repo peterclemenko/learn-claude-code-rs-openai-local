@@ -2,6 +2,7 @@ mod agent;
 mod compactor;
 mod context_window;
 mod hooks;
+pub mod memory;
 mod permission;
 mod skills;
 mod subagent;

@@ -1,0 +1,21 @@
+// The backend identifier selects a registered implementation.
+(
+    backend: "naivememorysystem",
+    // Relative storage paths resolve from this configuration file.
+    storage_dir: "../.local/memory",
+    // Maximum number of matching records included in prompt context.
+    recall_limit: 5,
+    // Disable categories here to prevent storing or recalling them.
+    enabled_categories: [Preference, Fact, Feedback, Reference],
+    // Scores multiply lexical match counts for category prioritization.
+    category_weights: {
+        "Preference": 2.0,
+        "Fact": 1.0,
+        "Feedback": 1.5,
+        "Reference": 0.75,
+    },
+    // Backend-specific options are intentionally string-valued and extensible.
+    backend_options: {
+        "file_name": "memories.ron",
+    },
+)

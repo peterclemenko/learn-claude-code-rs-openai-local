@@ -268,7 +268,7 @@ fn validate_manifest(manifest: &SkillManifest, path: &Path) -> Result<()> {
         );
     }
 
-    let allowed_tools = ["bash", "read_file", "todo_write", "delegate_task"];
+    let allowed_tools = ["bash", "read_file", "todo_write", "delegate_task", "memory"];
     let mut seen_tools = BTreeSet::new();
     for tool in &manifest.required_tools {
         if !allowed_tools.contains(&tool.as_str()) {
