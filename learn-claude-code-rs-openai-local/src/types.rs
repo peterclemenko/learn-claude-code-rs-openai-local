@@ -123,10 +123,16 @@ pub struct SubagentConfig {
 }
 
 fn default_agent_tools() -> Vec<String> {
-    ["bash", "read_file", "todo_write", "memory"]
-        .into_iter()
-        .map(str::to_owned)
-        .collect()
+    [
+        "bash",
+        "read_file",
+        "todo_write",
+        "memory",
+        "select_system_prompt",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect()
 }
 
 fn default_ollama_base_url() -> String {
@@ -241,7 +247,12 @@ fn validate_tool_names(tools: &[String], owner: &str) -> Result<()> {
     for tool in tools {
         if !matches!(
             tool.as_str(),
-            "bash" | "read_file" | "todo_write" | "delegate_task" | "memory"
+            "bash"
+                | "read_file"
+                | "todo_write"
+                | "delegate_task"
+                | "memory"
+                | "select_system_prompt"
         ) {
             bail!("{owner} declares unknown tool '{tool}'");
         }

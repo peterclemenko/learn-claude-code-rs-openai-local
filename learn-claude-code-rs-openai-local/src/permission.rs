@@ -160,24 +160,31 @@ impl PermissionManager {
 
     #[cfg(test)]
     pub(crate) fn allow_all_for_tests() -> Self {
-        let tool_configs = ["bash", "read_file", "todo_write", "delegate_task", "memory"]
-            .into_iter()
-            .map(|tool_name| {
-                (
-                    tool_name.to_owned(),
-                    ToolPermissionConfig {
-                        tool_name: tool_name.to_owned(),
-                        default_behavior: PermissionAction::Allow,
-                        safety_checks_enabled: false,
-                        rules: vec![PermissionRule {
-                            action: PermissionAction::Allow,
-                            pattern: "*".to_owned(),
-                            reason: "Test-only permission".to_owned(),
-                        }],
-                    },
-                )
-            })
-            .collect();
+        let tool_configs = [
+            "bash",
+            "read_file",
+            "todo_write",
+            "delegate_task",
+            "memory",
+            "select_system_prompt",
+        ]
+        .into_iter()
+        .map(|tool_name| {
+            (
+                tool_name.to_owned(),
+                ToolPermissionConfig {
+                    tool_name: tool_name.to_owned(),
+                    default_behavior: PermissionAction::Allow,
+                    safety_checks_enabled: false,
+                    rules: vec![PermissionRule {
+                        action: PermissionAction::Allow,
+                        pattern: "*".to_owned(),
+                        reason: "Test-only permission".to_owned(),
+                    }],
+                },
+            )
+        })
+        .collect();
         Self {
             root: PathBuf::new(),
             defaults: PermissionDefaults {
@@ -312,9 +319,9 @@ impl PermissionManager {
             UserChoice::Deny => {
                 self.consecutive_denials += 1;
                 if self.consecutive_denials >= 3 {
-                    println!(
-                        "[{} consecutive denials -- consider switching to plan mode]",
-                        self.consecutive_denials
+                    tracing::warn!(
+                        consecutive_denials = self.consecutive_denials,
+                        "Consider switching to plan mode"
                     );
                 }
                 Ok(false)
@@ -809,6 +816,43 @@ mod tests {
                     manager.check("read_file", r#"{"path":"README.md"}"#).0,
                     PermissionBehavior::Allow
                 );
+            },
+        );
+    }
+
+    #[test]
+    fn otel_strict_profile_blocks_prompt_tool_but_programmatic_api_bypasses_permission() {
+        crate::test_telemetry::run_test_case(
+            "permission::tests::otel_strict_profile_blocks_prompt_tool_but_programmatic_api_bypasses_permission",
+            || {
+                let permissions_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .parent()
+                    .unwrap()
+                    .join("config/permissions");
+                let mut permissions = PermissionManager::load(permissions_dir).unwrap();
+                permissions.handle_command("/profile strict").unwrap();
+                assert_eq!(
+                    permissions
+                        .check(
+                            "select_system_prompt",
+                            r#"{"action":"switch","name":"concise"}"#
+                        )
+                        .0,
+                    PermissionBehavior::Deny
+                );
+
+                let prompt_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .parent()
+                    .unwrap()
+                    .join("config/prompts");
+                let prompt_manager = crate::prompt::PromptManager::new(prompt_dir).unwrap();
+                let outcome = prompt_manager
+                    .select_prompt_sync(
+                        "concise",
+                        crate::prompt::PromptChangeSource::ProgrammaticApi,
+                    )
+                    .unwrap();
+                assert_eq!(outcome.name, "concise");
             },
         );
     }

@@ -1,0 +1,12 @@
+ToolPermissionConfig(
+    tool_name: "select_system_prompt",
+    default_behavior: Deny,
+    safety_checks_enabled: false,
+    rules: [
+        PermissionRule(
+            action: Deny,
+            pattern: "*",
+            reason: "Strict profile blocks agent-initiated system prompt changes.",
+        ),
+    ],
+)

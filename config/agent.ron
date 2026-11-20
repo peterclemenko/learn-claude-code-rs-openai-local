@@ -7,7 +7,7 @@ AgentRonConfig(
     temperature: 0.1,
     max_turns: 8,
     skills_dir: "../skills",
-    allowed_tools: ["bash", "read_file", "todo_write", "delegate_task", "memory"],
+    allowed_tools: ["bash", "read_file", "todo_write", "delegate_task", "memory", "select_system_prompt"],
     subagents: [
         SubagentConfig(
             name: "code_runner",

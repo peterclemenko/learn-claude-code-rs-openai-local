@@ -27,6 +27,7 @@ use crate::{
     hooks::{HookConfig, HookContext, HookDecision, HookDispatcher, HookEvent},
     memory::{MemoryBackend, MemoryQuery, build_memory_from_config, config::MemorySystemConfig},
     permission::PermissionManager,
+    prompt::PromptManager,
     skills::SkillRegistry,
     subagent::DelegateTaskTool,
     tools::{BashTool, ReadFileTool, TodoTool, ToolRegistry},
@@ -69,6 +70,7 @@ pub(crate) struct AgentRuntime {
     pub(crate) permissions: Arc<Mutex<PermissionManager>>,
     pub(crate) hooks: Arc<HookDispatcher>,
     pub(crate) memory: Arc<dyn MemoryBackend>,
+    pub(crate) prompts: Arc<PromptManager>,
 }
 
 pub struct Agent {
@@ -85,13 +87,15 @@ pub struct Agent {
     turns_completed: AtomicUsize,
     hooks: Arc<HookDispatcher>,
     memory: Arc<dyn MemoryBackend>,
+    prompts: Arc<PromptManager>,
 }
 
 impl Agent {
-    pub fn new(
+    pub fn new_with_prompts(
         config: AgentRonConfig,
         todo_state: Arc<Mutex<TodoState>>,
         compaction_config: CompactionConfig,
+        prompts: Arc<PromptManager>,
     ) -> Result<Self> {
         compaction_config.validate()?;
         let memory_config = MemorySystemConfig::load_or_default("config/memory.ron")?;
@@ -113,6 +117,7 @@ impl Agent {
             compaction_config,
             Arc::new(Mutex::new(PermissionManager::load("config/permissions")?)),
             memory,
+            prompts,
         )
     }
 
@@ -123,6 +128,11 @@ impl Agent {
         context_window_provider: Arc<dyn ContextWindowProvider>,
         client: Arc<dyn ChatCompletionClient>,
     ) -> Result<Self> {
+        let prompt_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("config/prompts");
+        let prompts = Arc::new(PromptManager::new(prompt_dir).unwrap());
         Self::new_with_chat_client_and_compaction(
             config,
             todo_state,
@@ -131,6 +141,7 @@ impl Agent {
             CompactionConfig::default(),
             Arc::new(Mutex::new(PermissionManager::allow_all_for_tests())),
             Arc::new(NoopMemoryBackend),
+            prompts,
         )
     }
 
@@ -142,6 +153,7 @@ impl Agent {
         compaction_config: CompactionConfig,
         permissions: Arc<Mutex<PermissionManager>>,
         memory: Arc<dyn MemoryBackend>,
+        prompts: Arc<PromptManager>,
     ) -> Result<Self> {
         let skills = Arc::new(SkillRegistry::load_dir(&config.skills_dir)?);
         Ok(Self::new_with_runtime(
@@ -153,6 +165,7 @@ impl Agent {
             compaction_config,
             permissions,
             memory,
+            prompts,
         ))
     }
 
@@ -165,6 +178,7 @@ impl Agent {
         compaction_config: CompactionConfig,
         permissions: Arc<Mutex<PermissionManager>>,
         memory: Arc<dyn MemoryBackend>,
+        prompts: Arc<PromptManager>,
     ) -> Self {
         let hooks = if Path::new("config/hooks.ron").exists() {
             HookConfig::load("config/hooks.ron")
@@ -185,6 +199,7 @@ impl Agent {
             permissions,
             hooks: Arc::new(hooks),
             memory,
+            prompts: Arc::clone(&prompts),
         };
         let allowed_tools = config.allowed_tools.clone();
         Self::from_runtime(config, todo_state, runtime, 0, None, allowed_tools)
@@ -204,6 +219,9 @@ impl Agent {
         );
         for tool in &allowed_tools {
             match tool.as_str() {
+                "select_system_prompt" => tools.register(
+                    crate::tools::SelectSystemPromptTool::new(Arc::clone(&runtime.prompts)),
+                ),
                 "bash" => tools.register(BashTool),
                 "read_file" => tools.register(ReadFileTool),
                 "todo_write" => tools.register(TodoTool::new(Arc::clone(&todo_state))),
@@ -249,6 +267,7 @@ impl Agent {
             turns_completed: AtomicUsize::new(0),
             hooks: Arc::clone(&runtime.hooks),
             memory: Arc::clone(&runtime.memory),
+            prompts: Arc::clone(&runtime.prompts),
         }
     }
 
@@ -294,9 +313,16 @@ impl Agent {
             );
         }
         let prompt = submitted.modified_prompt.as_deref().unwrap_or(prompt);
+        let active_prompt = if self.depth == 0 {
+            self.prompts
+                .render_active()
+                .unwrap_or_else(|_| self.config.system_prompt.clone())
+        } else {
+            self.config.system_prompt.clone()
+        };
         let mut messages = vec![
             ChatCompletionRequestSystemMessageArgs::default()
-                .content(self.config.system_prompt.as_str())
+                .content(active_prompt)
                 .build()?
                 .into(),
             ChatCompletionRequestUserMessageArgs::default()
@@ -380,9 +406,16 @@ impl Agent {
                 .await
                 .context("Failed to format recalled memory context")?
         };
+        let static_prompt = if self.depth == 0 {
+            self.prompts
+                .render_active()
+                .unwrap_or_else(|_| self.config.system_prompt.clone())
+        } else {
+            self.config.system_prompt.clone()
+        };
         let mut system_prompt = format!(
             "{}\n\nActive TODO task state (TOON):\n{}",
-            self.config.system_prompt, todo_context
+            static_prompt, todo_context
         );
         if !memory_context.is_empty() {
             system_prompt.push_str("\n\nRelevant durable memories (TOON):\n");
@@ -617,6 +650,7 @@ fn latest_user_text(messages: &[ChatCompletionRequestMessage]) -> Result<String>
 mod tests {
     use std::{
         collections::VecDeque,
+        path::Path,
         sync::{Arc, Mutex},
     };
 
@@ -642,6 +676,7 @@ mod tests {
         compactor::CompactionConfig,
         context_window::ContextWindowProvider,
         memory::NoopMemoryBackend,
+        prompt::PromptManager,
         types::{AgentRonConfig, SubagentConfig, TelemetryConfig, TodoState},
     };
 
@@ -817,6 +852,15 @@ mod tests {
             },
             Arc::new(Mutex::new(PermissionManager::allow_all_for_tests())),
             Arc::new(NoopMemoryBackend),
+            Arc::new(
+                PromptManager::new(
+                    Path::new(env!("CARGO_MANIFEST_DIR"))
+                        .parent()
+                        .unwrap()
+                        .join("config/prompts"),
+                )
+                .unwrap(),
+            ),
         )
         .unwrap();
         let mut messages: Vec<ChatCompletionRequestMessage> = serde_json::from_value(json!([
@@ -891,6 +935,15 @@ mod tests {
             CompactionConfig::default(),
             Arc::new(Mutex::new(PermissionManager::allow_all_for_tests())),
             memory,
+            Arc::new(
+                PromptManager::new(
+                    Path::new(env!("CARGO_MANIFEST_DIR"))
+                        .parent()
+                        .unwrap()
+                        .join("config/prompts"),
+                )
+                .unwrap(),
+            ),
         )
         .unwrap();
         let mut messages: Vec<ChatCompletionRequestMessage> =

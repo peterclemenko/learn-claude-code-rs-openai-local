@@ -4,6 +4,7 @@ mod context_window;
 mod hooks;
 pub mod memory;
 mod permission;
+pub mod prompt;
 mod skills;
 mod subagent;
 mod telemetry;
@@ -18,6 +19,7 @@ use std::{
     time::Duration,
 };
 
+use crate::prompt::{PromptChangeSource, PromptConfig, PromptManager};
 use crate::{
     agent::Agent,
     compactor::CompactionConfig,
@@ -47,6 +49,10 @@ struct Args {
     #[arg(short, long)]
     prompt: Option<String>,
 
+    /// Name or .ron filename of the active system prompt
+    #[arg(long, alias = "prompt-template", alias = "system-prompt")]
+    prompt_name: Option<String>,
+
     /// Enable debug-level logs
     #[arg(short, long)]
     verbose: bool,
@@ -60,42 +66,60 @@ async fn run_prompt(agent: &Agent, prompt: &str) -> Result<()> {
 
 async fn run_repl(agent: &Agent, config: &AgentRonConfig) -> Result<()> {
     agent.session_start().await;
-    let mut messages: Vec<ChatCompletionRequestMessage> = vec![
-        ChatCompletionRequestSystemMessageArgs::default()
-            .content(config.system_prompt.as_str())
-            .build()?
-            .into(),
-    ];
-
-    loop {
-        let prompt = Text::new("--- How can I help you?")
-            .prompt()
-            .context("Failed to read prompt")?;
-        if prompt.trim() == "exit()" {
-            break;
-        }
-        if matches!(
-            prompt.split_whitespace().next(),
-            Some("/rules" | "/mode" | "/profile")
-        ) {
-            match agent.handle_permission_command(&prompt) {
-                Ok(output) => println!("{output}"),
-                Err(error) => eprintln!("{error:#}"),
-            }
-            continue;
-        }
-
-        messages.push(
-            ChatCompletionRequestUserMessageArgs::default()
-                .content(prompt)
+    let result = async {
+        let mut messages: Vec<ChatCompletionRequestMessage> = vec![
+            ChatCompletionRequestSystemMessageArgs::default()
+                .content(config.system_prompt.as_str())
                 .build()?
                 .into(),
-        );
-        let answer = agent.run_turns(&mut messages).await?;
-        println!("--- Final response:\n{answer}");
+        ];
+
+        loop {
+            let prompt = match Text::new("--- How can I help you?").prompt() {
+                Ok(prompt) => prompt,
+                Err(error) if is_normal_repl_exit(&error) => {
+                    tracing::info!(reason = %error, "Interactive session ended by user");
+                    break;
+                }
+                Err(error) => return Err(error).context("Failed to read prompt"),
+            };
+            if prompt.trim() == "exit()" {
+                break;
+            }
+
+            if matches!(
+                prompt.split_whitespace().next(),
+                Some("/rules" | "/mode" | "/profile")
+            ) {
+                match agent.handle_permission_command(&prompt) {
+                    Ok(output) => println!("{output}"),
+                    Err(error) => eprintln!("{error:#}"),
+                }
+                continue;
+            }
+
+            messages.push(
+                ChatCompletionRequestUserMessageArgs::default()
+                    .content(prompt)
+                    .build()?
+                    .into(),
+            );
+            let answer = agent.run_turns(&mut messages).await?;
+            println!("--- Final response:\n{answer}");
+        }
+        Ok(())
     }
+    .await;
     agent.session_end().await;
-    Ok(())
+    result
+}
+
+fn is_normal_repl_exit(error: &inquire::error::InquireError) -> bool {
+    matches!(
+        error,
+        inquire::error::InquireError::OperationInterrupted
+            | inquire::error::InquireError::OperationCanceled
+    )
 }
 
 async fn run() -> Result<()> {
@@ -108,7 +132,33 @@ async fn run() -> Result<()> {
         &config.telemetry.otlp_endpoint,
     )?;
     let todo_state = Arc::new(Mutex::new(TodoState::default()));
-    let agent = Agent::new(config.clone(), todo_state, compaction_config)?;
+    let prompt_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .join("config/prompts");
+    let prompt_manager = Arc::new(PromptManager::new(prompt_dir)?);
+    let agent = Agent::new_with_prompts(
+        config.clone(),
+        Arc::clone(&todo_state),
+        compaction_config.clone(),
+        Arc::clone(&prompt_manager),
+    )?;
+    let prompt_config = std::fs::read_to_string("config/prompts.ron")
+        .ok()
+        .and_then(|contents| ron::from_str::<PromptConfig>(&contents).ok());
+    if let Some(prompt_name) = prompt_config
+        .as_ref()
+        .and_then(|config| config.active_prompt.as_deref())
+    {
+        prompt_manager
+            .select_prompt(prompt_name, PromptChangeSource::Config)
+            .await?;
+    }
+    if let Some(prompt_name) = args.prompt_name.as_deref() {
+        prompt_manager
+            .select_prompt(prompt_name, PromptChangeSource::CliFlag)
+            .await?;
+    }
 
     let result = if let Some(prompt) = args.prompt {
         run_prompt(&agent, &prompt).await
@@ -130,6 +180,14 @@ async fn main() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use inquire::error::InquireError;
+
+    use super::is_normal_repl_exit;
+
     #[test]
-    fn main_module_keeps_cli_rendering_separate_from_telemetry() {}
+    fn prompt_interruptions_and_cancellations_are_normal_repl_exits() {
+        assert!(is_normal_repl_exit(&InquireError::OperationInterrupted));
+        assert!(is_normal_repl_exit(&InquireError::OperationCanceled));
+        assert!(!is_normal_repl_exit(&InquireError::NotTTY));
+    }
 }

@@ -1,0 +1,6 @@
+ToolPermissionConfig(
+    tool_name: "select_system_prompt",
+    default_behavior: Ask,
+    safety_checks_enabled: false,
+    rules: [],
+)
