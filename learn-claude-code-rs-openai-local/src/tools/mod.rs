@@ -69,14 +69,6 @@ impl ToolRegistry {
         }
     }
 
-    pub(crate) fn with_permissions(permissions: Arc<Mutex<PermissionManager>>) -> Self {
-        Self {
-            tools: BTreeMap::new(),
-            permissions: Some(permissions),
-            hooks: Arc::new(HookDispatcher::disabled()),
-        }
-    }
-
     pub(crate) fn with_permissions_and_hooks(
         permissions: Arc<Mutex<PermissionManager>>,
         hooks: Arc<HookDispatcher>,
@@ -281,7 +273,7 @@ mod tests {
     use tracing_subscriber::{Layer, layer::Context, prelude::*};
 
     use super::{BashTool, ReadFileTool, TodoTool, ToolExecutionMetrics, ToolRegistry, ToonTool};
-    use crate::{permission::PermissionManager, types::TodoState};
+    use crate::{hooks::HookDispatcher, permission::PermissionManager, types::TodoState};
 
     fn assert_usage(metrics: &ToolExecutionMetrics, name: &str, input: &str, output: &str) {
         assert_eq!(metrics.tool, name);
@@ -349,7 +341,10 @@ mod tests {
                     .unwrap()
                     .handle_command("/profile strict")
                     .unwrap();
-                let mut registry = ToolRegistry::with_permissions(permissions);
+                let mut registry = ToolRegistry::with_permissions_and_hooks(
+                    permissions,
+                    Arc::new(HookDispatcher::disabled()),
+                );
                 registry.register(BashTool);
 
                 let execution = registry

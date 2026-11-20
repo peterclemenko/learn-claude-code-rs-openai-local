@@ -72,10 +72,13 @@ pub(crate) struct HookDispatcher {
 
 impl HookDispatcher {
     pub(crate) fn from_config(config: HookConfig) -> Self {
+        let mut native = NativeHookRegistry::default();
+        native.register("noop", NoopNativeHook);
         Self {
             rules: Arc::new(config.rules),
             native: Arc::new(NativeHookRegistry::default()),
         }
+        .with_native(native)
     }
 
     pub(crate) fn with_native(mut self, native: NativeHookRegistry) -> Self {
@@ -108,9 +111,18 @@ impl HookDispatcher {
     #[instrument(
         name = "hook.dispatch",
         skip(self, context),
-        fields(hook.event = %context.event, hook.tool_name = ?context.tool_name)
+        fields(
+            hook.event = %context.event,
+            hook.tool_name = tracing::field::Empty,
+            hook.decision = tracing::field::Empty,
+            hook.duration_ms = tracing::field::Empty,
+        )
     )]
     pub(crate) async fn dispatch(&self, mut context: HookContext) -> HookDispatchResult {
+        let dispatch_started = Instant::now();
+        if let Some(tool_name) = &context.tool_name {
+            tracing::Span::current().record("hook.tool_name", tool_name.as_str());
+        }
         let event = context.event.parse().unwrap_or(HookEvent::SessionStart);
         let mut aggregate = HookDispatchResult {
             decision: HookDecision::Allow,
@@ -141,10 +153,11 @@ impl HookDispatcher {
                         if let Some(native) = self.native.get(name) {
                             native.execute(context.clone()).await.map(|response| {
                                 (
-                                    HookResponseMetadata::Native,
                                     0i64,
                                     String::new(),
                                     String::new(),
+                                    started.elapsed().as_millis().try_into().unwrap_or(u64::MAX),
+                                    false,
                                     response,
                                 )
                             })
@@ -155,10 +168,11 @@ impl HookDispatcher {
                     HookBackend::External { .. } => {
                         match HookRunner::run_external(rule, &rule.backend, &context).await {
                             Ok((output, response)) => Ok((
-                                HookResponseMetadata::External,
                                 output.exit_code,
                                 output.stdout,
                                 output.stderr,
+                                output.duration_ms,
+                                output.timed_out,
                                 response,
                             )),
                             Err(error) => Err(error),
@@ -171,9 +185,9 @@ impl HookDispatcher {
 
             let duration_ms = started.elapsed().as_millis().try_into().unwrap_or(u64::MAX);
             let (decision, reason) = match outcome {
-                Ok((_metadata, exit_code, stdout, stderr, response)) => {
+                Ok((exit_code, stdout, stderr, hook_duration_ms, timed_out, response)) => {
                     let response_decision = response.decision.as_deref().unwrap_or("");
-                    let decision = if exit_code != 0 {
+                    let decision = if timed_out || exit_code != 0 {
                         match rule.failure_mode {
                             super::config::FailureMode::FailOpen => HookDecision::Allow,
                             super::config::FailureMode::FailClosed => HookDecision::Deny,
@@ -203,16 +217,18 @@ impl HookDispatcher {
                         aggregate.reason = Some(reason);
                     }
                     span.record("hook.exit_code", exit_code);
-                    span.record("hook.stdout", stdout);
-                    span.record("hook.stderr", stderr);
-                    span.record("hook.duration_ms", duration_ms);
+                    span.record("hook.stdout", stdout.as_str());
+                    span.record("hook.stderr", stderr.as_str());
+                    span.record("hook.duration_ms", hook_duration_ms);
+                    span.record("hook.timed_out", timed_out);
                     span.record("hook.decision", decision.as_str());
                     info!(
                         parent: &span,
                         hook.id = %rule.id,
                         hook.decision = decision.as_str(),
                         hook.exit_code = exit_code,
-                        hook.duration_ms = duration_ms,
+                        hook.duration_ms = hook_duration_ms,
+                        hook.timed_out = timed_out,
                         "Hook rule completed"
                     );
                     (decision, aggregate.reason.clone())
@@ -224,6 +240,7 @@ impl HookDispatcher {
                     };
                     span.record("hook.exit_code", -1i64);
                     span.record("hook.duration_ms", duration_ms);
+                    span.record("hook.timed_out", false);
                     span.record("hook.decision", HookDecision::Error.as_str());
                     error!(
                         parent: &span,
@@ -250,6 +267,21 @@ impl HookDispatcher {
             }
         }
 
+        let duration_ms = dispatch_started
+            .elapsed()
+            .as_millis()
+            .try_into()
+            .unwrap_or(u64::MAX);
+        let span = tracing::Span::current();
+        span.record("hook.decision", aggregate.decision.as_str());
+        span.record("hook.duration_ms", duration_ms);
+        info!(
+            hook.event = %context.event,
+            hook.tool_name = ?context.tool_name,
+            hook.decision = aggregate.decision.as_str(),
+            hook.duration_ms = duration_ms,
+            "Hook dispatch completed"
+        );
         aggregate
     }
 
@@ -278,10 +310,13 @@ impl HookDispatcher {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
-enum HookResponseMetadata {
-    Native,
-    External,
+struct NoopNativeHook;
+
+#[async_trait]
+impl NativeHook for NoopNativeHook {
+    async fn execute(&self, _context: HookContext) -> anyhow::Result<HookResponse> {
+        Ok(HookResponse::default())
+    }
 }
 
 impl std::str::FromStr for HookEvent {
@@ -302,10 +337,11 @@ impl std::str::FromStr for HookEvent {
 }
 
 #[cfg(test)]
-mod tests {
+mod otel_hook_tests {
     use super::*;
+    use opentelemetry::Value;
     use opentelemetry::trace::TracerProvider as _;
-    use opentelemetry_sdk::trace::{InMemorySpanExporter, SdkTracerProvider};
+    use opentelemetry_sdk::trace::{InMemorySpanExporter, SdkTracerProvider, SpanData};
     use tracing::instrument::WithSubscriber;
     use tracing_subscriber::prelude::*;
 
@@ -315,6 +351,86 @@ mod tests {
             .with_simple_exporter(exporter.clone())
             .build();
         (exporter, provider)
+    }
+
+    fn otel_only_subscriber(
+        provider: &SdkTracerProvider,
+    ) -> impl tracing::Subscriber + Send + Sync + 'static {
+        tracing_subscriber::registry()
+            .with(tracing_opentelemetry::layer().with_tracer(provider.tracer("otel-hook-tests")))
+    }
+
+    fn flush_and_shutdown(
+        exporter: &InMemorySpanExporter,
+        provider: &SdkTracerProvider,
+    ) -> Vec<SpanData> {
+        provider.force_flush().unwrap();
+        let spans = exporter.get_finished_spans().unwrap();
+        provider.shutdown().unwrap();
+        assert!(exporter.is_shutdown_called());
+        spans
+    }
+
+    fn attribute<'a>(span: &'a SpanData, name: &str) -> Option<&'a Value> {
+        span.attributes
+            .iter()
+            .find(|attribute| attribute.key.as_str() == name)
+            .map(|attribute| &attribute.value)
+    }
+
+    fn assert_string_attribute(span: &SpanData, name: &str, expected: &str) {
+        let actual = attribute(span, name);
+        assert!(
+            matches!(actual, Some(Value::String(value)) if value.as_str() == expected),
+            "attribute {name} expected {expected:?}, got {actual:?}"
+        );
+    }
+
+    fn assert_present(span: &SpanData, name: &str) {
+        assert!(
+            attribute(span, name).is_some(),
+            "missing OTel attribute {name}"
+        );
+    }
+
+    fn dispatch_span<'a>(spans: &'a [SpanData], event: &str, tool_name: &str) -> &'a SpanData {
+        spans
+            .iter()
+            .find(|span| {
+                span.name.as_ref() == "hook.dispatch"
+                    && matches!(
+                        attribute(span, "hook.event"),
+                        Some(Value::String(value)) if value.as_str() == event
+                    )
+                    && matches!(
+                        attribute(span, "hook.tool_name"),
+                        Some(Value::String(value)) if value.as_str() == tool_name
+                    )
+            })
+            .expect("hook.dispatch span with expected event and tool name")
+    }
+
+    fn external_span<'a>(spans: &'a [SpanData], stderr: &str) -> &'a SpanData {
+        spans
+            .iter()
+            .find(|span| {
+                span.name.as_ref() == "hook.run_external"
+                    && matches!(
+                        attribute(span, "hook.stderr"),
+                        Some(Value::String(value)) if value.as_str() == stderr
+                    )
+            })
+            .expect("external hook runner span")
+    }
+
+    fn timed_out_external_span(spans: &[SpanData]) -> &SpanData {
+        spans
+            .iter()
+            .find(|span| {
+                span.name.as_ref() == "hook.run_external"
+                    && matches!(attribute(span, "hook.timed_out"), Some(Value::Bool(true)))
+            })
+            .expect("timed-out external hook runner span")
     }
 
     fn rule(event: HookEvent, command: &str, args: Vec<String>) -> HookRule {
@@ -334,52 +450,116 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn external_pre_tool_hook_can_block_and_emit_stderr() {
+    async fn otel_pre_tool_dispatch_records_allow_block_and_modify() {
         let (exporter, provider) = exporter_provider();
-        let tracer = provider.tracer("hook-test");
-        let subscriber =
-            tracing_subscriber::registry().with(tracing_opentelemetry::layer().with_tracer(tracer));
-        let dispatcher = HookDispatcher::from_config(HookConfig {
+        let dispatch = |response: serde_json::Value, stderr: &str| {
+            let response = response.to_string();
+            let script = format!("read _; printf '%s' '{response}'; printf '%s' '{stderr}' >&2");
+            HookDispatcher::from_config(HookConfig {
                 rules: vec![rule(
                     HookEvent::PreToolUse,
                     "/bin/sh",
-                    vec![
-                        "-c".to_owned(),
-                        "read _; printf '{\"decision\":\"deny\",\"reason\":\"blocked\",\"reminder\":\"stop now\"}' >&1; printf 'diagnostic stderr' >&2".to_owned(),
-                    ],
+                    vec!["-c".to_owned(), script],
                 )],
-            });
+            })
+        };
+        let context = |tool_name: &str| HookContext {
+            event: HookEvent::PreToolUse.as_name().to_owned(),
+            tool_name: Some(tool_name.to_owned()),
+            tool_input: Some(r#"{"value":1}"#.to_owned()),
+            tool_output: None,
+            prompt: None,
+            subagent_name: None,
+        };
 
+        let allow = dispatch(serde_json::json!({"decision":"allow"}), "allow stderr")
+            .dispatch(context("bash"))
+            .with_subscriber(otel_only_subscriber(&provider))
+            .await;
+        let block = dispatch(
+            serde_json::json!({"decision":"deny","reason":"blocked"}),
+            "block stderr",
+        )
+        .dispatch(context("read_file"))
+        .with_subscriber(otel_only_subscriber(&provider))
+        .await;
+        let modify = dispatch(
+            serde_json::json!({
+                "decision": "modify",
+                "modified_arguments": r#"{"value":2}"#,
+            }),
+            "modify stderr",
+        )
+        .dispatch(context("todo_write"))
+        .with_subscriber(otel_only_subscriber(&provider))
+        .await;
+
+        assert_eq!(allow.decision, HookDecision::Allow);
+        assert_eq!(block.decision, HookDecision::Deny);
+        assert_eq!(block.reason.as_deref(), Some("blocked"));
+        assert_eq!(modify.decision, HookDecision::Modify);
+        assert_eq!(modify.modified_arguments.as_deref(), Some(r#"{"value":2}"#));
+
+        let spans = flush_and_shutdown(&exporter, &provider);
+        for (tool_name, decision) in [
+            ("bash", "allow"),
+            ("read_file", "deny"),
+            ("todo_write", "modify"),
+        ] {
+            let dispatch_span = dispatch_span(&spans, "PreToolUse", tool_name);
+            assert_string_attribute(dispatch_span, "hook.decision", decision);
+            assert_present(dispatch_span, "hook.duration_ms");
+        }
+        let runner = external_span(&spans, "modify stderr");
+        assert_present(runner, "hook.exit_code");
+        assert_present(runner, "hook.duration_ms");
+        assert_string_attribute(runner, "hook.stderr", "modify stderr");
+    }
+
+    #[tokio::test]
+    async fn otel_external_hook_records_exit_status_and_captured_streams() {
+        let (exporter, provider) = exporter_provider();
+        let response = r#"{"decision":"deny","reason":"nonzero exit"}"#;
+        let script =
+            format!("read _; printf '%s' '{response}'; printf '%s' 'captured stderr' >&2; exit 7");
+        let dispatcher = HookDispatcher::from_config(HookConfig {
+            rules: vec![rule(
+                HookEvent::PreToolUse,
+                "/bin/sh",
+                vec!["-c".to_owned(), script],
+            )],
+        });
         let result = dispatcher
             .dispatch(HookContext {
                 event: HookEvent::PreToolUse.as_name().to_owned(),
                 tool_name: Some("bash".to_owned()),
-                tool_input: Some(r#"{"command":"rm -rf /"}"#.to_owned()),
+                tool_input: Some("{}".to_owned()),
                 tool_output: None,
                 prompt: None,
                 subagent_name: None,
             })
-            .with_subscriber(subscriber)
+            .with_subscriber(otel_only_subscriber(&provider))
             .await;
 
-        assert_eq!(result.decision, HookDecision::Deny);
-        assert_eq!(result.reason.as_deref(), Some("blocked"));
-        provider.force_flush().unwrap();
-        let spans = exporter.get_finished_spans().unwrap();
-        assert!(
-            spans
-                .iter()
-                .any(|span| span.name.as_ref() == "hook.dispatch")
-        );
-        assert!(spans.iter().any(|span| span.name.as_ref() == "hook.rule"));
+        assert_eq!(result.decision, HookDecision::Allow);
+        let spans = flush_and_shutdown(&exporter, &provider);
+        let runner = external_span(&spans, "captured stderr");
+        assert!(matches!(
+            attribute(runner, "hook.exit_code"),
+            Some(Value::I64(7))
+        ));
+        assert_string_attribute(runner, "hook.stdout", response);
+        assert_string_attribute(runner, "hook.stderr", "captured stderr");
+        assert!(matches!(
+            attribute(runner, "hook.timed_out"),
+            Some(Value::Bool(false))
+        ));
+        assert_present(runner, "hook.duration_ms");
     }
 
     #[tokio::test]
-    async fn external_hook_timeout_kills_process_and_is_observed() {
+    async fn otel_external_hook_records_timeout() {
         let (exporter, provider) = exporter_provider();
-        let tracer = provider.tracer("hook-test");
-        let subscriber =
-            tracing_subscriber::registry().with(tracing_opentelemetry::layer().with_tracer(tracer));
         let mut timed_rule = rule(
             HookEvent::PreToolUse,
             "/bin/sh",
@@ -400,32 +580,32 @@ mod tests {
                 prompt: None,
                 subagent_name: None,
             })
-            .with_subscriber(subscriber)
+            .with_subscriber(otel_only_subscriber(&provider))
             .await;
         assert_eq!(result.decision, HookDecision::Allow);
-        provider.force_flush().unwrap();
-        assert!(
-            exporter
-                .get_finished_spans()
-                .unwrap()
-                .iter()
-                .any(|span| span.name.as_ref() == "hook.rule")
-        );
+        let spans = flush_and_shutdown(&exporter, &provider);
+        let runner = timed_out_external_span(&spans);
+        assert!(matches!(
+            attribute(runner, "hook.exit_code"),
+            Some(Value::I64(-1))
+        ));
+        assert!(matches!(
+            attribute(runner, "hook.timed_out"),
+            Some(Value::Bool(true))
+        ));
+        assert_present(runner, "hook.duration_ms");
     }
 
     #[tokio::test]
-    async fn post_tool_hook_adds_follow_up_reminder() {
+    async fn otel_post_tool_use_records_external_hook_and_reminder() {
         let (exporter, provider) = exporter_provider();
-        let tracer = provider.tracer("hook-test");
-        let subscriber =
-            tracing_subscriber::registry().with(tracing_opentelemetry::layer().with_tracer(tracer));
         let dispatcher = HookDispatcher::from_config(HookConfig {
             rules: vec![rule(
                 HookEvent::PostToolUse,
                 "/bin/sh",
                 vec![
                     "-c".to_owned(),
-                    "read _; printf '{\"decision\":\"noop\",\"reminder\":\"verify the output\"}'"
+                    "read _; printf '{\"decision\":\"noop\",\"reminder\":\"verify the output\"}'; printf 'post stderr' >&2"
                         .to_owned(),
                 ],
             )],
@@ -440,16 +620,23 @@ mod tests {
                 prompt: None,
                 subagent_name: None,
             })
-            .with_subscriber(subscriber)
+            .with_subscriber(otel_only_subscriber(&provider))
             .await;
         assert_eq!(result.reminders, vec!["verify the output".to_owned()]);
-        provider.force_flush().unwrap();
-        assert!(
-            exporter
-                .get_finished_spans()
-                .unwrap()
-                .iter()
-                .any(|span| span.name.as_ref() == "hook.dispatch")
+        let spans = flush_and_shutdown(&exporter, &provider);
+        let dispatch = dispatch_span(&spans, "PostToolUse", "read_file");
+        assert_string_attribute(dispatch, "hook.decision", "noop");
+        assert_present(dispatch, "hook.duration_ms");
+        let runner = external_span(&spans, "post stderr");
+        assert!(matches!(
+            attribute(runner, "hook.exit_code"),
+            Some(Value::I64(0))
+        ));
+        assert_string_attribute(
+            runner,
+            "hook.stdout",
+            r#"{"decision":"noop","reminder":"verify the output"}"#,
         );
+        assert_string_attribute(runner, "hook.stderr", "post stderr");
     }
 }

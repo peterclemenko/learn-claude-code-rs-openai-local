@@ -121,6 +121,7 @@ async fn run() -> Result<()> {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    let _ = rustls::crypto::ring::default_provider().install_default();
     tokio::time::timeout(Duration::from_secs(3600), run())
         .await
         .context("Agent session exceeded the one-hour timeout")?

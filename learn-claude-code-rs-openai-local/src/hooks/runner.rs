@@ -51,7 +51,15 @@ impl HookRunner {
     #[instrument(
         name = "hook.run_external",
         skip(rule, payload),
-        fields(hook.id = %rule.id, hook.name = %rule.name)
+        fields(
+            hook.id = %rule.id,
+            hook.name = %rule.name,
+            hook.exit_code = tracing::field::Empty,
+            hook.duration_ms = tracing::field::Empty,
+            hook.timed_out = tracing::field::Empty,
+            hook.stdout = tracing::field::Empty,
+            hook.stderr = tracing::field::Empty,
+        )
     )]
     pub(crate) async fn run_external(
         rule: &HookRule,
@@ -107,6 +115,12 @@ impl HookRunner {
                 let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
                 let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
                 let exit_code = output.status.code().map(i32::from).unwrap_or(-1) as i64;
+                let span = tracing::Span::current();
+                span.record("hook.exit_code", exit_code);
+                span.record("hook.duration_ms", duration_ms);
+                span.record("hook.timed_out", false);
+                span.record("hook.stdout", stdout.as_str());
+                span.record("hook.stderr", stderr.as_str());
                 let response = parse_hook_response(payload_format, &stdout)
                     .unwrap_or_else(|error| {
                         warn!(hook.id = %rule.id, error = %error, "External hook returned invalid response; defaulting to noop");
@@ -133,13 +147,28 @@ impl HookRunner {
             }
             Err(_) => {
                 let duration_ms = started.elapsed().as_millis().try_into().unwrap_or(u64::MAX);
+                let span = tracing::Span::current();
+                span.record("hook.exit_code", -1i64);
+                span.record("hook.duration_ms", duration_ms);
+                span.record("hook.timed_out", true);
                 error!(
                     hook.id = %rule.id,
+                    hook.exit_code = -1i64,
                     hook.timeout_ms = rule.timeout_ms,
                     hook.duration_ms = duration_ms,
+                    hook.timed_out = true,
                     "External hook timed out"
                 );
-                Err(anyhow::anyhow!("Hook '{}' timed out", rule.id))
+                Ok((
+                    ExternalHookOutput {
+                        exit_code: -1,
+                        stdout: String::new(),
+                        stderr: String::new(),
+                        duration_ms,
+                        timed_out: true,
+                    },
+                    HookResponse::default(),
+                ))
             }
         }
     }

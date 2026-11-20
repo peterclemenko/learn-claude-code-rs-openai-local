@@ -120,6 +120,7 @@ mod tests {
 
     #[tokio::test]
     async fn ollama_provider_reads_active_context_size_from_api() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
         let (request_sender, request_receiver) = std::sync::mpsc::channel();
