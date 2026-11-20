@@ -14,6 +14,7 @@ use async_trait::async_trait;
 use tracing::{Instrument, error, info, instrument};
 
 use crate::{
+    hooks::{HookContext, HookDecision, HookDispatcher, HookEvent},
     permission::{PermissionBehavior, PermissionManager},
     types::toon_table,
 };
@@ -55,6 +56,7 @@ fn estimated_tokens(bytes: usize) -> usize {
 pub struct ToolRegistry {
     tools: BTreeMap<&'static str, Arc<dyn ToonTool>>,
     permissions: Option<Arc<Mutex<PermissionManager>>>,
+    hooks: Arc<HookDispatcher>,
 }
 
 impl ToolRegistry {
@@ -63,6 +65,7 @@ impl ToolRegistry {
         Self {
             tools: BTreeMap::new(),
             permissions: None,
+            hooks: Arc::new(HookDispatcher::disabled()),
         }
     }
 
@@ -70,6 +73,18 @@ impl ToolRegistry {
         Self {
             tools: BTreeMap::new(),
             permissions: Some(permissions),
+            hooks: Arc::new(HookDispatcher::disabled()),
+        }
+    }
+
+    pub(crate) fn with_permissions_and_hooks(
+        permissions: Arc<Mutex<PermissionManager>>,
+        hooks: Arc<HookDispatcher>,
+    ) -> Self {
+        Self {
+            tools: BTreeMap::new(),
+            permissions: Some(permissions),
+            hooks,
         }
     }
 
@@ -108,12 +123,45 @@ impl ToolRegistry {
             .tools
             .get(name)
             .with_context(|| format!("Unknown tool '{name}'"))?;
+        let mut effective_payload = payload.to_owned();
+        let pre_hook = self
+            .hooks
+            .dispatch(HookContext {
+                event: HookEvent::PreToolUse.as_name().to_owned(),
+                tool_name: Some(name.to_owned()),
+                tool_input: Some(payload.to_owned()),
+                tool_output: None,
+                prompt: None,
+                subagent_name: None,
+            })
+            .await;
+        if pre_hook.decision == HookDecision::Deny {
+            let reason = pre_hook
+                .reason
+                .unwrap_or_else(|| "Denied by PreToolUse hook".to_owned());
+            info!(tool = name, reason = %reason, "Tool call denied by hook");
+            let output = format!("PreToolUse denied tool '{name}': {reason}");
+            let metrics = ToolExecutionMetrics {
+                tool: name.to_owned(),
+                duration_ms: 0,
+                input_bytes: payload.len(),
+                estimated_input_tokens: estimated_tokens(payload.len()),
+                output_bytes: output.len(),
+                estimated_output_tokens: estimated_tokens(output.len()),
+                succeeded: false,
+            };
+            return Ok(ToolExecution { output, metrics });
+        }
+        if let Some(arguments) = pre_hook.modified_arguments {
+            effective_payload = arguments;
+            info!(tool = name, "Tool input modified by PreToolUse hook");
+        }
 
         let (allowed, denial_reason) = if let Some(permissions) = &self.permissions {
             let mut permissions = permissions.lock().map_err(|error| {
                 anyhow::anyhow!("Permission manager mutex is poisoned: {error}")
             })?;
-            let (behavior, reason) = permissions.check(name, payload);
+            let (behavior, reason) = permissions.check(name, &effective_payload);
             match behavior {
                 PermissionBehavior::Allow => (true, None),
                 PermissionBehavior::Deny => {
@@ -121,7 +169,7 @@ impl ToolRegistry {
                     (false, Some(reason))
                 }
                 PermissionBehavior::Ask => {
-                    let allowed = permissions.ask_user(name, payload)?;
+                    let allowed = permissions.ask_user(name, &effective_payload)?;
                     if !allowed {
                         info!(tool = name, "Tool call denied by user");
                     }
@@ -132,7 +180,7 @@ impl ToolRegistry {
             (true, None)
         };
 
-        let input_bytes = payload.len();
+        let input_bytes = effective_payload.len();
         let span = tracing::info_span!(
             "tool.execution",
             tool = name,
@@ -145,7 +193,9 @@ impl ToolRegistry {
         );
         let started_at = Instant::now();
         let result = if allowed {
-            tool.execute(payload).instrument(span.clone()).await
+            tool.execute(&effective_payload)
+                .instrument(span.clone())
+                .await
         } else {
             Ok(format!(
                 "Permission denied for tool '{name}': {}",
@@ -167,6 +217,22 @@ impl ToolRegistry {
                 )
             }
         };
+        let post_hook = self
+            .hooks
+            .dispatch(HookContext {
+                event: HookEvent::PostToolUse.as_name().to_owned(),
+                tool_name: Some(name.to_owned()),
+                tool_input: Some(effective_payload.clone()),
+                tool_output: Some(output.clone()),
+                prompt: None,
+                subagent_name: None,
+            })
+            .await;
+        let mut output = output;
+        for reminder in post_hook.reminders {
+            output.push_str("\n\nHook reminder (TOON):\n");
+            output.push_str(&reminder);
+        }
         let output_bytes = output.len();
         let estimated_output_tokens = estimated_tokens(output_bytes);
         let metrics = ToolExecutionMetrics {

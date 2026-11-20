@@ -10,6 +10,7 @@ use tracing::{Instrument, error, info, info_span};
 
 use crate::{
     agent::{Agent, AgentRuntime},
+    hooks::{HookContext, HookDecision, HookEvent},
     tools::ToonTool,
     types::{AgentRonConfig, SubagentConfig, TodoState, parse_toon_table, toon_table},
 };
@@ -196,6 +197,26 @@ impl DelegateTaskTool {
         );
 
         async {
+            let start_hook = self
+                .runtime
+                .hooks
+                .dispatch(HookContext {
+                    event: HookEvent::SubagentStart.as_name().to_owned(),
+                    tool_name: None,
+                    tool_input: None,
+                    tool_output: None,
+                    prompt: Some(request.task.clone()),
+                    subagent_name: Some(subagent.name.clone()),
+                })
+                .await;
+            if start_hook.decision == HookDecision::Deny {
+                bail!(
+                    "Subagent start denied by hook: {}",
+                    start_hook
+                        .reason
+                        .unwrap_or_else(|| "No reason provided".to_owned())
+                );
+            }
             info!(
                 subagent_id = %id,
                 subagent = %subagent.name,
@@ -224,6 +245,17 @@ impl DelegateTaskTool {
 
             match child.run_prompt(&request.task).await {
                 Ok(result) => {
+                    self.runtime
+                        .hooks
+                        .dispatch(HookContext {
+                            event: HookEvent::SubagentStop.as_name().to_owned(),
+                            tool_name: None,
+                            tool_input: None,
+                            tool_output: Some(result.clone()),
+                            prompt: Some(request.task.clone()),
+                            subagent_name: Some(subagent.name.clone()),
+                        })
+                        .await;
                     let result = SubagentResult {
                         id: id.clone(),
                         agent: subagent.name.clone(),
@@ -249,6 +281,17 @@ impl DelegateTaskTool {
                     Ok(validated_result.render_toon())
                 }
                 Err(run_error) => {
+                    self.runtime
+                        .hooks
+                        .dispatch(HookContext {
+                            event: HookEvent::SubagentStop.as_name().to_owned(),
+                            tool_name: None,
+                            tool_input: None,
+                            tool_output: Some(run_error.to_string()),
+                            prompt: Some(request.task.clone()),
+                            subagent_name: Some(subagent.name.clone()),
+                        })
+                        .await;
                     let span = tracing::Span::current();
                     span.record("status", SubagentStatus::Failed.to_string());
                     span.record("succeeded", false);

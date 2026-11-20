@@ -12,7 +12,7 @@ use opentelemetry::trace::TracerProvider as _;
 use opentelemetry_otlp::WithExportConfig;
 use opentelemetry_sdk::{Resource, trace::SdkTracerProvider};
 use tracing::{Instrument, info, info_span};
-use tracing_subscriber::{Layer, layer::SubscriberExt, util::SubscriberInitExt};
+use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 struct TestTelemetry {
     provider: Option<SdkTracerProvider>,
@@ -91,7 +91,7 @@ fn record_test_result(
     if let Some(provider) = &telemetry.provider
         && let Err(error) = provider.force_flush()
     {
-        eprintln!("Failed to export test telemetry for '{name}': {error}");
+        tracing::error!(test.name = name, error = %error, "Failed to export test telemetry");
     }
 }
 
@@ -103,9 +103,6 @@ fn test_telemetry() -> &'static TestTelemetry {
 }
 
 fn initialize_test_tracing() -> Result<TestTelemetry> {
-    let format_layer = tracing_subscriber::fmt::layer()
-        .with_test_writer()
-        .with_filter(tracing_subscriber::filter::LevelFilter::INFO);
     if should_export_telemetry()? {
         let runtime = test_runtime()?;
         let _runtime_guard = runtime.enter();
@@ -135,7 +132,6 @@ fn initialize_test_tracing() -> Result<TestTelemetry> {
             )
             .build();
         tracing_subscriber::registry()
-            .with(format_layer)
             .with(tracing_opentelemetry::layer().with_tracer(provider.tracer(service_name)))
             .try_init()
             .context("Failed to initialize test tracing subscriber")?;
@@ -144,7 +140,6 @@ fn initialize_test_tracing() -> Result<TestTelemetry> {
         })
     } else {
         tracing_subscriber::registry()
-            .with(format_layer)
             .try_init()
             .context("Failed to initialize test tracing subscriber")?;
         Ok(TestTelemetry { provider: None })

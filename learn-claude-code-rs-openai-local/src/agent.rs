@@ -1,3 +1,4 @@
+use std::path::Path;
 use std::sync::{
     Arc, Mutex,
     atomic::{AtomicUsize, Ordering},
@@ -21,6 +22,7 @@ use tracing::{Instrument, info, instrument, warn};
 use crate::{
     compactor::{CompactionConfig, ContextCompactor},
     context_window::{ContextWindowProvider, OllamaContextWindowProvider},
+    hooks::{HookConfig, HookContext, HookDecision, HookDispatcher, HookEvent},
     permission::PermissionManager,
     skills::SkillRegistry,
     subagent::DelegateTaskTool,
@@ -62,6 +64,7 @@ pub(crate) struct AgentRuntime {
     pub(crate) subagents: Arc<Vec<SubagentConfig>>,
     pub(crate) skills: Arc<SkillRegistry>,
     pub(crate) permissions: Arc<Mutex<PermissionManager>>,
+    pub(crate) hooks: Arc<HookDispatcher>,
 }
 
 pub struct Agent {
@@ -76,6 +79,7 @@ pub struct Agent {
     allowed_tools: Vec<String>,
     depth: usize,
     turns_completed: AtomicUsize,
+    hooks: Arc<HookDispatcher>,
 }
 
 impl Agent {
@@ -150,6 +154,16 @@ impl Agent {
         compaction_config: CompactionConfig,
         permissions: Arc<Mutex<PermissionManager>>,
     ) -> Self {
+        let hooks = if Path::new("config/hooks.ron").exists() {
+            HookConfig::load("config/hooks.ron")
+                .map(HookDispatcher::from_config)
+                .unwrap_or_else(|error| {
+                    warn!(error = %error, "Failed to load hook configuration; hooks disabled");
+                    HookDispatcher::disabled()
+                })
+        } else {
+            HookDispatcher::disabled()
+        };
         let runtime = AgentRuntime {
             client,
             context_window_provider,
@@ -157,6 +171,7 @@ impl Agent {
             subagents: Arc::new(config.subagents.clone()),
             skills,
             permissions,
+            hooks: Arc::new(hooks),
         };
         let allowed_tools = config.allowed_tools.clone();
         Self::from_runtime(config, todo_state, runtime, 0, None, allowed_tools)
@@ -170,7 +185,10 @@ impl Agent {
         depth_limit: Option<usize>,
         allowed_tools: Vec<String>,
     ) -> Self {
-        let mut tools = ToolRegistry::with_permissions(Arc::clone(&runtime.permissions));
+        let mut tools = ToolRegistry::with_permissions_and_hooks(
+            Arc::clone(&runtime.permissions),
+            Arc::clone(&runtime.hooks),
+        );
         for tool in &allowed_tools {
             match tool.as_str() {
                 "bash" => tools.register(BashTool),
@@ -213,6 +231,7 @@ impl Agent {
             allowed_tools,
             depth,
             turns_completed: AtomicUsize::new(0),
+            hooks: Arc::clone(&runtime.hooks),
         }
     }
 
@@ -227,8 +246,37 @@ impl Agent {
             .handle_command(command)
     }
 
+    pub(crate) async fn session_start(&self) {
+        self.hooks.session_start().await;
+    }
+
+    pub(crate) async fn session_end(&self) {
+        self.hooks.session_end().await;
+    }
+
     #[instrument(name = "agent.prompt", skip(self, prompt))]
     pub async fn run_prompt(&self, prompt: &str) -> Result<String> {
+        self.hooks.session_start().await;
+        let submitted = self
+            .hooks
+            .dispatch(HookContext {
+                event: HookEvent::UserPromptSubmit.as_name().to_owned(),
+                tool_name: None,
+                tool_input: None,
+                tool_output: None,
+                prompt: Some(prompt.to_owned()),
+                subagent_name: None,
+            })
+            .await;
+        if submitted.decision == HookDecision::Deny {
+            bail!(
+                "Prompt denied by hook: {}",
+                submitted
+                    .reason
+                    .unwrap_or_else(|| "No reason provided".to_owned())
+            );
+        }
+        let prompt = submitted.modified_prompt.as_deref().unwrap_or(prompt);
         let mut messages = vec![
             ChatCompletionRequestSystemMessageArgs::default()
                 .content(self.config.system_prompt.as_str())
@@ -239,7 +287,9 @@ impl Agent {
                 .build()?
                 .into(),
         ];
-        self.run_turns(&mut messages).await
+        let result = self.run_turns(&mut messages).await;
+        self.hooks.session_end().await;
+        result
     }
 
     #[instrument(name = "agent.turn_loop", skip(self, messages), fields(agent = %self.config.name, depth = self.depth))]
@@ -533,6 +583,7 @@ mod tests {
         sync::{Arc, Mutex},
     };
 
+    use crate::permission::PermissionManager;
     use anyhow::{Context, Result};
     use async_openai::types::chat::{
         ChatCompletionRequestMessage, CompletionUsage, CreateChatCompletionRequest,
@@ -726,6 +777,7 @@ mod tests {
                 compaction_system_prompt: "Summarize prior context.".to_owned(),
                 target_summary_tokens: 32,
             },
+            Arc::new(Mutex::new(PermissionManager::allow_all_for_tests())),
         )
         .unwrap();
         let mut messages: Vec<ChatCompletionRequestMessage> = serde_json::from_value(json!([

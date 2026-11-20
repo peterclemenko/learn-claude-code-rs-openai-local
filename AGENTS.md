@@ -2,14 +2,13 @@ Markdown
 <!-- gitnexus:start -->
 # GitNexus — Code Intelligence
 
-This project is indexed by GitNexus as **learn-claude-code-rs-openai-local** (469 symbols, 1111 relationships, 40 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
+This project is indexed by GitNexus as **learn-claude-code-rs-openai-local** (608 symbols, 1453 relationships, 52 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
 
 > If any GitNexus tool warns the index is stale, run `npx gitnexus analyze` in terminal first.
 
 ## Always Do
 
 - **MUST run impact analysis before editing any symbol.** Before modifying a function, class, or method, run `gitnexus_impact({target: "symbolName", direction: "upstream"})` and report the blast radius (direct callers, affected processes, risk level) to the user.
-- **MUST use GitNexus for all refactoring attempts.** Whenever extracting, splitting, moving, or renaming symbols across modules, run `gitnexus_context({name: "symbolName"})` and `gitnexus_impact` first, and execute renames via `gitnexus_rename` to preserve call-graph integrity.
 - **MUST run `gitnexus_detect_changes()` before committing** to verify your changes only affect expected symbols and execution flows.
 - **MUST warn the user** if impact analysis returns HIGH or CRITICAL risk before proceeding with edits.
 - When exploring unfamiliar code, use `gitnexus_query({query: "concept"})` to find execution flows instead of grepping. It returns process-grouped results ranked by relevance.
@@ -18,30 +17,29 @@ This project is indexed by GitNexus as **learn-claude-code-rs-openai-local** (46
 ## Never Do
 
 - NEVER edit a function, class, or method without first running `gitnexus_impact` on it.
-- NEVER refactor or reorganize code across files without first mapping upstream/downstream call graphs via GitNexus.
 - NEVER ignore HIGH or CRITICAL risk warnings from impact analysis.
 - NEVER rename symbols with find-and-replace — use `gitnexus_rename` which understands the call graph.
 - NEVER commit changes without running `gitnexus_detect_changes()` to check affected scope.
 
 ## Resources
 
-| Resource                                                           | Use for                                  |
-| ------------------------------------------------------------------ | ---------------------------------------- |
-| `gitnexus://repo/learn-claude-code-rs-openai-local/context`        | Codebase overview, check index freshness |
-| `gitnexus://repo/learn-claude-code-rs-openai-local/clusters`       | All functional areas                     |
-| `gitnexus://repo/learn-claude-code-rs-openai-local/processes`      | All execution flows                      |
-| `gitnexus://repo/learn-claude-code-rs-openai-local/process/{name}` | Step-by-step execution trace             |
+| Resource | Use for |
+|----------|---------|
+| `gitnexus://repo/learn-claude-code-rs-openai-local/context` | Codebase overview, check index freshness |
+| `gitnexus://repo/learn-claude-code-rs-openai-local/clusters` | All functional areas |
+| `gitnexus://repo/learn-claude-code-rs-openai-local/processes` | All execution flows |
+| `gitnexus://repo/learn-claude-code-rs-openai-local/process/{name}` | Step-by-step execution trace |
 
 ## CLI
 
-| Task                                         | Read this skill file                                        |
-| -------------------------------------------- | ----------------------------------------------------------- |
-| Understand architecture / "How does X work?" | `.claude/skills/gitnexus/gitnexus-exploring/SKILL.md`       |
-| Blast radius / "What breaks if I change X?"  | `.claude/skills/gitnexus/gitnexus-impact-analysis/SKILL.md` |
-| Trace bugs / "Why is X failing?"             | `.claude/skills/gitnexus/gitnexus-debugging/SKILL.md`       |
-| Rename / extract / split / refactor          | `.claude/skills/gitnexus/gitnexus-refactoring/SKILL.md`     |
-| Tools, resources, schema reference           | `.claude/skills/gitnexus/gitnexus-guide/SKILL.md`           |
-| Index, status, clean, wiki CLI commands      | `.claude/skills/gitnexus/gitnexus-cli/SKILL.md`             |
+| Task | Read this skill file |
+|------|---------------------|
+| Understand architecture / "How does X work?" | `.claude/skills/gitnexus/gitnexus-exploring/SKILL.md` |
+| Blast radius / "What breaks if I change X?" | `.claude/skills/gitnexus/gitnexus-impact-analysis/SKILL.md` |
+| Trace bugs / "Why is X failing?" | `.claude/skills/gitnexus/gitnexus-debugging/SKILL.md` |
+| Rename / extract / split / refactor | `.claude/skills/gitnexus/gitnexus-refactoring/SKILL.md` |
+| Tools, resources, schema reference | `.claude/skills/gitnexus/gitnexus-guide/SKILL.md` |
+| Index, status, clean, wiki CLI commands | `.claude/skills/gitnexus/gitnexus-cli/SKILL.md` |
 
 <!-- gitnexus:end -->
 

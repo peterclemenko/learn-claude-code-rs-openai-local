@@ -1,0 +1,17 @@
+(
+    rules: [
+        (
+            id: "audit-pre-tool",
+            name: "Audit pre-tool calls",
+            event: PreToolUse,
+            matcher: All,
+            timeout_ms: 5000,
+            failure_mode: FailOpen,
+            backend: External(
+                command: "/bin/true",
+                args: [],
+                payload_format: Json,
+            ),
+        ),
+    ],
+)
