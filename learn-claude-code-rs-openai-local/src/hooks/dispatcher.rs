@@ -451,6 +451,7 @@ mod otel_hook_tests {
 
     #[tokio::test]
     async fn otel_pre_tool_dispatch_records_allow_block_and_modify() {
+        let _subscriber_lock = crate::test_telemetry::lock_test_subscriber();
         let (exporter, provider) = exporter_provider();
         let dispatch = |response: serde_json::Value, stderr: &str| {
             let response = response.to_string();
@@ -518,6 +519,7 @@ mod otel_hook_tests {
 
     #[tokio::test]
     async fn otel_external_hook_records_exit_status_and_captured_streams() {
+        let _subscriber_lock = crate::test_telemetry::lock_test_subscriber();
         let (exporter, provider) = exporter_provider();
         let response = r#"{"decision":"deny","reason":"nonzero exit"}"#;
         let script =
@@ -559,6 +561,7 @@ mod otel_hook_tests {
 
     #[tokio::test]
     async fn otel_external_hook_records_timeout() {
+        let _subscriber_lock = crate::test_telemetry::lock_test_subscriber();
         let (exporter, provider) = exporter_provider();
         let mut timed_rule = rule(
             HookEvent::PreToolUse,
@@ -598,6 +601,7 @@ mod otel_hook_tests {
 
     #[tokio::test]
     async fn otel_post_tool_use_records_external_hook_and_reminder() {
+        let _subscriber_lock = crate::test_telemetry::lock_test_subscriber();
         let (exporter, provider) = exporter_provider();
         let dispatcher = HookDispatcher::from_config(HookConfig {
             rules: vec![rule(

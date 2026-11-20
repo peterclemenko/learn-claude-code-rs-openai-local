@@ -103,7 +103,7 @@ impl NaiveMemorySystem {
 #[async_trait]
 impl MemoryBackend for NaiveMemorySystem {
     fn backend_name(&self) -> &str {
-        "naivememorysystem"
+        "naive_memory_system"
     }
 
     #[instrument(name = "memory.naive.recall", skip(self, query), fields(memory.query_bytes = query.text.len()))]

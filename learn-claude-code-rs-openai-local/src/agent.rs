@@ -954,6 +954,7 @@ mod tests {
 
     #[tokio::test]
     async fn matched_skill_is_injected_and_traced_during_the_mock_chat_cycle() {
+        let _subscriber_lock = crate::test_telemetry::lock_test_subscriber();
         let client = Arc::new(MockChatClient::new(vec![
             response(
                 None,
@@ -1243,6 +1244,7 @@ mod tests {
 
     #[tokio::test]
     async fn nested_delegations_propagate_opentelemetry_trace_and_parent_ids() {
+        let _subscriber_lock = crate::test_telemetry::lock_test_subscriber();
         let client = Arc::new(MockChatClient::new(vec![
             response(
                 None,

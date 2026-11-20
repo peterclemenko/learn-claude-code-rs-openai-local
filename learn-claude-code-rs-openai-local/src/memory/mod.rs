@@ -1,6 +1,8 @@
 mod naive_memory_system;
 
 pub mod config;
+#[cfg(test)]
+mod conformance_tests;
 pub mod registry;
 
 use std::{collections::BTreeMap, str::FromStr, sync::Arc, time::Instant};
@@ -375,6 +377,7 @@ mod tests {
 
         #[tokio::test]
         async fn otel_memory_operations_export_structured_spans_and_shutdown_cleanly() {
+            let _subscriber_lock = crate::test_telemetry::lock_test_subscriber();
             let exporter = InMemorySpanExporter::default();
             let provider = SdkTracerProvider::builder()
                 .with_simple_exporter(exporter.clone())

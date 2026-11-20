@@ -28,7 +28,15 @@ pub struct MemorySystemConfig {
 
 impl MemorySystemConfig {
     /// Loads and validates a RON memory configuration from `path`.
-    #[instrument(name = "memory.config.load", skip(path), fields(memory.config_path = %path.as_ref().display(), memory.outcome = tracing::field::Empty))]
+    #[instrument(
+        name = "memory.config.load",
+        skip(path),
+        fields(
+            memory.config_path = %path.as_ref().display(),
+            memory.backend = tracing::field::Empty,
+            memory.outcome = tracing::field::Empty
+        )
+    )]
     pub fn load(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();
         let contents = match fs::read_to_string(path) {
@@ -57,20 +65,40 @@ impl MemorySystemConfig {
             error!(error = %failure, "Memory configuration validation failed");
             return Err(failure);
         }
+        tracing::Span::current().record("memory.backend", config.backend.as_str());
         tracing::Span::current().record("memory.outcome", "ok");
         info!(memory.backend = %config.backend, "Loaded memory configuration");
         Ok(config)
     }
 
     /// Loads a RON memory configuration or uses validated defaults if it is absent.
-    #[instrument(name = "memory.config.load_or_default", skip(path), fields(memory.config_path = %path.as_ref().display(), memory.outcome = tracing::field::Empty))]
+    #[instrument(
+        name = "memory.config.load_or_default",
+        skip(path),
+        fields(
+            memory.config_path = %path.as_ref().display(),
+            memory.backend = tracing::field::Empty,
+            memory.outcome = tracing::field::Empty
+        )
+    )]
     pub fn load_or_default(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();
         match fs::metadata(path) {
-            Ok(_) => Self::load(path),
+            Ok(_) => match Self::load(path) {
+                Ok(config) => {
+                    tracing::Span::current().record("memory.backend", config.backend.as_str());
+                    tracing::Span::current().record("memory.outcome", "ok");
+                    Ok(config)
+                }
+                Err(failure) => {
+                    tracing::Span::current().record("memory.outcome", "error");
+                    Err(failure)
+                }
+            },
             Err(failure) if failure.kind() == ErrorKind::NotFound => {
                 let config = Self::default();
                 config.validate()?;
+                tracing::Span::current().record("memory.backend", config.backend.as_str());
                 tracing::Span::current().record("memory.outcome", "default");
                 info!(
                     config_path = %path.display(),
@@ -149,7 +177,7 @@ impl MemorySystemConfig {
 impl Default for MemorySystemConfig {
     fn default() -> Self {
         Self {
-            backend: "naivememorysystem".to_owned(),
+            backend: "naive_memory_system".to_owned(),
             storage_dir: PathBuf::from(".local/memory"),
             recall_limit: 5,
             enabled_categories: default_enabled_categories(),
@@ -220,7 +248,7 @@ mod tests {
     fn absent_memory_config_uses_validated_defaults() {
         let path = temp_dir().join("missing.ron");
         let config = MemorySystemConfig::load_or_default(&path).unwrap();
-        assert_eq!(config.backend, "naivememorysystem");
+        assert_eq!(config.backend, "naive_memory_system");
         assert_eq!(config.recall_limit, 5);
     }
 
@@ -255,7 +283,7 @@ mod tests {
             .unwrap()
             .to_path_buf();
         let config = MemorySystemConfig::load(workspace_root.join("config/memory.ron")).unwrap();
-        assert_eq!(config.backend, "naivememorysystem");
+        assert_eq!(config.backend, "naive_memory_system");
         assert_eq!(config.recall_limit, 5);
     }
 }

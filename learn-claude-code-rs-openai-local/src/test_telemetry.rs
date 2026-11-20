@@ -3,7 +3,7 @@ use std::{
     future::Future,
     panic::{AssertUnwindSafe, catch_unwind, resume_unwind},
     path::Path,
-    sync::OnceLock,
+    sync::{Mutex, MutexGuard, OnceLock},
     time::Instant,
 };
 
@@ -21,6 +21,13 @@ struct TestTelemetry {
 static TEST_TELEMETRY: OnceLock<std::result::Result<TestTelemetry, String>> = OnceLock::new();
 static TEST_RUNTIME: OnceLock<std::result::Result<tokio::runtime::Runtime, String>> =
     OnceLock::new();
+static TEST_SUBSCRIBER_LOCK: Mutex<()> = Mutex::new(());
+
+pub(crate) fn lock_test_subscriber() -> MutexGuard<'static, ()> {
+    TEST_SUBSCRIBER_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
 
 pub(crate) fn run_test_case(name: &'static str, test: impl FnOnce()) {
     let telemetry = test_telemetry();

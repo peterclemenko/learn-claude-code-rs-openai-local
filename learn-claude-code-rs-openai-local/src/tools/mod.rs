@@ -436,6 +436,7 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_emits_tool_usage_in_a_tracing_span() {
+        let _subscriber_lock = crate::test_telemetry::lock_test_subscriber();
         let captured = Arc::new(Mutex::new(Vec::new()));
         let subscriber = tracing_subscriber::registry().with(CaptureLayer(Arc::clone(&captured)));
         let dispatch = tracing::Dispatch::new(subscriber);

@@ -16,11 +16,11 @@ run:
 
 # Run the full workspace test suite
 test:
-    nix develop --command cargo test --workspace -- --nocapture
+    RUST_TEST_THREADS=1 nix develop --command cargo test --workspace -- --nocapture
 
 # Run tests with all features enabled
 test-all:
-    OTEL_SDK_DISABLED="${OTEL_SDK_DISABLED:-true}" nix develop --command cargo test --workspace --all-features -- --nocapture
+    RUST_TEST_THREADS=1 OTEL_SDK_DISABLED="${OTEL_SDK_DISABLED:-true}" nix develop --command cargo test --workspace --all-features -- --nocapture
 
 # Run clippy checks across all packages and targets
 lint:
@@ -44,7 +44,7 @@ test-toon:
 
 # Verify OpenTelemetry instrumentation
 test-otel:
-    nix develop --command cargo test --workspace otel -- --nocapture
+    RUST_TEST_THREADS=1 nix develop --command cargo test --workspace otel -- --nocapture
 
 # Run optional local-inference integration tests
 test-local:

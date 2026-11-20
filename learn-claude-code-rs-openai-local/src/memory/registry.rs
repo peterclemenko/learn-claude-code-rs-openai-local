@@ -31,7 +31,7 @@ impl MemoryRegistry {
     pub fn new() -> Self {
         let mut registry = Self::default();
         registry.builders.insert(
-            "naivememorysystem".to_owned(),
+            "naive_memory_system".to_owned(),
             Arc::new(|config| Ok(Arc::new(NaiveMemorySystem::open(config)?))),
         );
         registry.builders.insert(
@@ -41,7 +41,6 @@ impl MemoryRegistry {
         registry
     }
 
-    /// Registers a custom backend constructor under a unique identifier.
     /// Registers a custom backend constructor under a unique identifier.
     #[instrument(
         name = "memory.backend.register_local",
@@ -167,7 +166,7 @@ mod tests {
         let noop = MemoryRegistry::new().build(&config).unwrap();
         assert_eq!(noop.backend_name(), "noop");
 
-        config.backend = "naivememorysystem".to_owned();
+        config.backend = "naive_memory_system".to_owned();
         config.storage_dir = std::env::temp_dir().join(format!(
             "memory-registry-test-{}-{}",
             std::process::id(),
@@ -177,7 +176,7 @@ mod tests {
                 .as_nanos()
         ));
         let naive = MemoryRegistry::new().build(&config).unwrap();
-        assert_eq!(naive.backend_name(), "naivememorysystem");
+        assert_eq!(naive.backend_name(), "naive_memory_system");
         let id = naive
             .remember(MemoryEntry {
                 category: MemoryCategory::Fact,

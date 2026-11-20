@@ -1,6 +1,6 @@
 // The backend identifier selects a registered implementation.
 (
-    backend: "naivememorysystem",
+    backend: "naive_memory_system",
     // Relative storage paths resolve from this configuration file.
     storage_dir: "../.local/memory",
     // Maximum number of matching records included in prompt context.

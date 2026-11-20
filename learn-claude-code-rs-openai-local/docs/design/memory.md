@@ -8,7 +8,7 @@ not know how a backend stores or searches records; it receives an
 `Arc<dyn MemoryBackend>` in `AgentRuntime`. Subagents clone the same runtime, so
 they share the selected backend and durable store.
 
-The built-in `naivememorysystem` backend stores RON-serialized `MemoryRecord` values in
+The built-in `naive_memory_system` backend stores RON-serialized `MemoryRecord` values in
 a local file. It supports lexical recall, optional scope/category filtering,
 category weights, and the durable categories `Preference`, `Fact`, `Feedback`,
 and `Reference`. Writes use a temporary file followed by rename, and in-memory
@@ -16,7 +16,7 @@ state is updated only after the new store is persisted. `noop` provides an empty
 backend for isolated runs.
 
 `MemoryRegistry` maps configured backend names to builder functions. Its built-in
-registry includes `naivememorysystem` and `noop`; `register_memory_backend` adds a
+registry includes `naive_memory_system` and `noop`; `register_memory_backend` adds a
 custom implementation to the process registry before `Agent::new` builds the
 selected backend. All backends constructed by the registry are wrapped with
 common OpenTelemetry instrumentation.
@@ -32,7 +32,7 @@ common OpenTelemetry instrumentation.
 - `MemoryBackend` defines `recall`, `remember`, `forget`, `list`,
   `format_for_context`, and `health_check`.
 
-The `naivememorysystem` backend scores query tokens against entry content, tags, scope,
+The `naive_memory_system` backend scores query tokens against entry content, tags, scope,
 and metadata. Category weights multiply the lexical score; matching records
 are ordered by score and then update time. An empty query returns the newest
 eligible records up to the configured recall limit.
@@ -65,7 +65,7 @@ The active configuration is `config/memory.ron`:
 
 ```ron
 (
-    backend: "naivememorysystem",
+    backend: "naive_memory_system",
     storage_dir: "../.local/memory",
     recall_limit: 5,
     enabled_categories: [Preference, Fact, Feedback, Reference],
@@ -82,11 +82,11 @@ The active configuration is `config/memory.ron`:
 ```
 
 Relative `storage_dir` values resolve from the configuration file.
-`naivememorysystem` uses `backend_options["file_name"]` (default `memories.ron`) and rejects
+`naive_memory_system` uses `backend_options["file_name"]` (default `memories.ron`) and rejects
 absolute paths or path traversal. `backend_options` is a string map reserved for
 backend-specific settings. Unknown backend IDs and invalid configuration are
 reported as errors. If the config file is absent, validated defaults select
-`naivememorysystem` and use `.local/memory`.
+`naive_memory_system` and use `.local/memory`.
 
 `enabled_categories` defaults to all four built-in categories and controls both
 recall eligibility and whether new entries can be remembered. `category_weights`
@@ -149,3 +149,53 @@ Failures are emitted as structured tracing error events and propagated to the
 caller. The `otel_memory_tests` module uses an in-memory span exporter and a
 subscriber containing only the OpenTelemetry layer; it verifies operation
 attributes and provider shutdown without console logging.
+
+## Conformance and stress testing
+
+The reusable test-only `run_backend_conformance_suite` helper accepts an
+`Arc<dyn MemoryBackend>`. It checks CRUD and health behavior, all four memory
+categories, metadata/tags/scope preservation, result limits and filtering,
+TOON output for empty and populated results, large entries, and durable
+rehydration. The same contract is run against the built-in backend and a
+dynamically registered test backend. Backend selection tests also switch
+between `naive_memory_system`, `noop`, and a custom ID using generated RON
+configurations and isolated temporary directories.
+
+To validate a custom backend, add its builder to `custom_registry()` in
+`src/memory/conformance_tests.rs`, construct it through `MemoryRegistry` from
+test RON, and invoke `run_backend_conformance_suite` with its trait object.
+This keeps the assertions independent of the concrete backend while retaining
+backend-specific tests for persistence or service behavior.
+
+Run the conformance and stress coverage with:
+
+```sh
+cargo test --workspace memory::conformance_tests -- --nocapture
+```
+
+The suite includes concurrent readers and writers and verifies that corrupted
+storage reports an error without panicking. OpenTelemetry-focused tests use an
+in-memory exporter and an OTel-only subscriber; run them with the repository
+target:
+
+```sh
+just test-otel
+```
+
+The `just test` and `just test-otel` recipes run the Rust test harness
+single-threaded because tests temporarily install per-test tracing dispatchers;
+this avoids nondeterministic exporter assertions from parallel subscriber
+changes. Production execution is unaffected.
+
+The ignored manual benchmark records OTel measurements for independent
+`remember` batches of 100, 1,000, and 5,000 entries, plus per-write latency at
+corpus sizes 50, 500, and 5,000, cold/warm recall, small/large listing, and
+forget. Measurements are emitted as structured tracing events and benchmark
+span attributes—never terminal output. Since the naive backend persists the
+full RON store on each write, the 5,000-entry tier can take substantially
+longer than the regular test suite. Run it explicitly when comparing backends:
+
+```sh
+cargo test --workspace memory_benchmark_operation_latency_and_corpus_scaling \
+  -- --ignored --nocapture
+```
