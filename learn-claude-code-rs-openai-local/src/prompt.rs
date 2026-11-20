@@ -426,6 +426,19 @@ mod tests {
     }
 
     #[test]
+    fn loads_snarky_joker_prompt() {
+        crate::test_telemetry::run_test_case("prompt::tests::loads_snarky_joker_prompt", || {
+            let path = project_prompt_dir().join("snarky_joker.ron");
+            let template = PromptTemplate::load(path).unwrap();
+            let rendered = template
+                .render(&PromptRenderContext::from_current_environment())
+                .unwrap();
+            assert!(rendered.contains("The Glitch"));
+            assert!(rendered.contains("Catchphrases"));
+        });
+    }
+
+    #[test]
     fn rejects_prompt_path_traversal() {
         crate::test_telemetry::run_test_case(
             "prompt::tests::rejects_prompt_path_traversal",
