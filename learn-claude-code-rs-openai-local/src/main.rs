@@ -1,6 +1,7 @@
 mod agent;
 mod compactor;
 mod context_window;
+mod error_recovery;
 mod hooks;
 pub mod memory;
 mod permission;
@@ -146,10 +147,10 @@ async fn run() -> Result<()> {
     let prompt_config = std::fs::read_to_string("config/prompts.ron")
         .ok()
         .and_then(|contents| ron::from_str::<PromptConfig>(&contents).ok());
-    if let Some(prompt_name) = prompt_config
+    let legacy_prompt_name = prompt_config
         .as_ref()
-        .and_then(|config| config.active_prompt.as_deref())
-    {
+        .and_then(|config| config.active_prompt.as_deref());
+    if let Some(prompt_name) = config.active_prompt.as_deref().or(legacy_prompt_name) {
         prompt_manager
             .select_prompt(prompt_name, PromptChangeSource::Config)
             .await?;

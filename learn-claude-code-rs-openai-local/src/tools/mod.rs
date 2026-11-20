@@ -13,9 +13,10 @@ use std::{
 use anyhow::Result;
 use async_openai::types::chat::{ChatCompletionTool, ChatCompletionTools, FunctionObject};
 use async_trait::async_trait;
-use tracing::{Instrument, error, info, instrument};
+use tracing::{Instrument, info, instrument};
 
 use crate::{
+    error_recovery::{ErrorKind, ErrorRecoveryEngine, RecoveryAction},
     hooks::{HookContext, HookDecision, HookDispatcher, HookEvent},
     permission::{PermissionBehavior, PermissionManager},
     types::toon_table,
@@ -61,26 +62,38 @@ pub struct ToolRegistry {
     tools: BTreeMap<&'static str, Arc<dyn ToonTool>>,
     permissions: Option<Arc<Mutex<PermissionManager>>>,
     hooks: Arc<HookDispatcher>,
+    recovery: Arc<ErrorRecoveryEngine>,
+    failure_attempts: Mutex<BTreeMap<String, u32>>,
 }
 
 impl ToolRegistry {
     #[cfg(test)]
     pub fn new() -> Self {
+        Self::with_recovery(Arc::new(ErrorRecoveryEngine::default()))
+    }
+
+    #[cfg(test)]
+    fn with_recovery(recovery: Arc<ErrorRecoveryEngine>) -> Self {
         Self {
             tools: BTreeMap::new(),
             permissions: None,
             hooks: Arc::new(HookDispatcher::disabled()),
+            recovery,
+            failure_attempts: Mutex::new(BTreeMap::new()),
         }
     }
 
     pub(crate) fn with_permissions_and_hooks(
         permissions: Arc<Mutex<PermissionManager>>,
         hooks: Arc<HookDispatcher>,
+        recovery: Arc<ErrorRecoveryEngine>,
     ) -> Self {
         Self {
             tools: BTreeMap::new(),
             permissions: Some(permissions),
             hooks,
+            recovery,
+            failure_attempts: Mutex::new(BTreeMap::new()),
         }
     }
 
@@ -115,10 +128,27 @@ impl ToolRegistry {
     }
 
     pub async fn dispatch_with_metrics(&self, name: &str, payload: &str) -> Result<ToolExecution> {
-        let tool = self
-            .tools
-            .get(name)
-            .with_context(|| format!("Unknown tool '{name}'"))?;
+        let Some(tool) = self.tools.get(name) else {
+            let span = tracing::info_span!(
+                "tool.execution",
+                tool = name,
+                input_bytes = payload.len(),
+                estimated_input_tokens = estimated_tokens(payload.len()),
+                output_bytes = tracing::field::Empty,
+                estimated_output_tokens = tracing::field::Empty,
+                duration_ms = tracing::field::Empty,
+                succeeded = tracing::field::Empty,
+                error.kind = tracing::field::Empty,
+                error.recoverable = tracing::field::Empty,
+                recovery.action = tracing::field::Empty,
+                recovery.attempt = tracing::field::Empty,
+                recovery.outcome = tracing::field::Empty,
+            );
+            return self
+                .handle_tool_error(name, payload, format!("Unknown tool '{name}'"), 0, &span)
+                .instrument(span.clone())
+                .await;
+        };
         let mut effective_payload = payload.to_owned();
         let pre_hook = self
             .hooks
@@ -129,6 +159,7 @@ impl ToolRegistry {
                 tool_output: None,
                 prompt: None,
                 subagent_name: None,
+                recovery: None,
             })
             .await;
         if pre_hook.decision == HookDecision::Deny {
@@ -186,6 +217,11 @@ impl ToolRegistry {
             estimated_output_tokens = tracing::field::Empty,
             duration_ms = tracing::field::Empty,
             succeeded = tracing::field::Empty,
+            error.kind = tracing::field::Empty,
+            error.recoverable = tracing::field::Empty,
+            recovery.action = tracing::field::Empty,
+            recovery.attempt = tracing::field::Empty,
+            recovery.outcome = tracing::field::Empty,
         );
         let started_at = Instant::now();
         let result = if allowed {
@@ -203,14 +239,24 @@ impl ToolRegistry {
             .as_millis()
             .try_into()
             .unwrap_or(u64::MAX);
-        let (output, succeeded) = match result {
-            Ok(output) => (output, allowed),
+        let output = match result {
+            Ok(output) => {
+                if allowed {
+                    self.reset_failure_attempts(name)?;
+                }
+                output
+            }
             Err(tool_error) => {
-                error!(parent: &span, tool = name, error = %tool_error, "Tool execution failed");
-                (
-                    toon_table("tool_error", &["error"], &[tool_error.to_string()]),
-                    false,
-                )
+                return self
+                    .handle_tool_error(
+                        name,
+                        &effective_payload,
+                        tool_error.to_string(),
+                        duration_ms,
+                        &span,
+                    )
+                    .instrument(span.clone())
+                    .await;
             }
         };
         let post_hook = self
@@ -222,6 +268,7 @@ impl ToolRegistry {
                 tool_output: Some(output.clone()),
                 prompt: None,
                 subagent_name: None,
+                recovery: None,
             })
             .await;
         let mut output = output;
@@ -238,7 +285,7 @@ impl ToolRegistry {
             estimated_input_tokens: estimated_tokens(input_bytes),
             output_bytes,
             estimated_output_tokens,
-            succeeded,
+            succeeded: allowed,
         };
         span.record("output_bytes", metrics.output_bytes);
         span.record("estimated_output_tokens", metrics.estimated_output_tokens);
@@ -257,9 +304,130 @@ impl ToolRegistry {
         );
         Ok(ToolExecution { output, metrics })
     }
-}
 
-use anyhow::Context;
+    fn next_failure_attempt(&self, name: &str) -> Result<u32> {
+        let mut attempts = self
+            .failure_attempts
+            .lock()
+            .map_err(|error| anyhow::anyhow!("Tool recovery attempt state is poisoned: {error}"))?;
+        let attempt = attempts.entry(name.to_owned()).or_default();
+        *attempt = attempt.saturating_add(1);
+        Ok(*attempt)
+    }
+
+    fn reset_failure_attempts(&self, name: &str) -> Result<()> {
+        self.failure_attempts
+            .lock()
+            .map_err(|error| anyhow::anyhow!("Tool recovery attempt state is poisoned: {error}"))?
+            .remove(name);
+        Ok(())
+    }
+
+    async fn handle_tool_error(
+        &self,
+        name: &str,
+        payload: &str,
+        message: String,
+        duration_ms: u64,
+        span: &tracing::Span,
+    ) -> Result<ToolExecution> {
+        let attempt = self.next_failure_attempt(name)?;
+        let kind = ErrorKind::classify_tool_error(&message);
+        let action = self.recovery.tool_action(kind, attempt);
+        let outcome = action.outcome();
+        let context_toon = toon_table(
+            "recovery_context",
+            &["tool", "error_kind", "attempt", "action", "outcome"],
+            &[
+                name.to_owned(),
+                kind.as_str().to_owned(),
+                attempt.to_string(),
+                action.as_str().to_owned(),
+                outcome.to_owned(),
+            ],
+        );
+        let diagnostics = crate::hooks::RecoveryDiagnostics {
+            error_kind: kind.as_str().to_owned(),
+            recoverable: kind.is_recoverable(),
+            recovery_action: action.as_str().to_owned(),
+            attempt,
+            outcome: outcome.to_owned(),
+            message: message.clone(),
+            context_toon: context_toon.clone(),
+        };
+        span.record("error.kind", kind.as_str());
+        span.record("error.recoverable", kind.is_recoverable());
+        span.record("recovery.action", action.as_str());
+        span.record("recovery.attempt", i64::from(attempt));
+        span.record("recovery.outcome", outcome);
+        self.recovery
+            .notify(
+                &self.hooks,
+                HookEvent::Error,
+                Some(name.to_owned()),
+                diagnostics.clone(),
+            )
+            .await;
+        self.recovery
+            .notify(
+                &self.hooks,
+                HookEvent::Recovery,
+                Some(name.to_owned()),
+                diagnostics.clone(),
+            )
+            .await;
+
+        let mut output = toon_table("tool_error", &["error"], &[message.clone()]);
+        output.push('\n');
+        output.push_str(&context_toon);
+        let post_hook = self
+            .hooks
+            .dispatch(HookContext {
+                event: HookEvent::PostToolUse.as_name().to_owned(),
+                tool_name: Some(name.to_owned()),
+                tool_input: Some(payload.to_owned()),
+                tool_output: Some(output.clone()),
+                prompt: None,
+                subagent_name: None,
+                recovery: Some(diagnostics),
+            })
+            .await;
+        for reminder in post_hook.reminders {
+            output.push_str("\n\nHook reminder (TOON):\n");
+            output.push_str(&reminder);
+        }
+
+        let metrics = ToolExecutionMetrics {
+            tool: name.to_owned(),
+            duration_ms,
+            input_bytes: payload.len(),
+            estimated_input_tokens: estimated_tokens(payload.len()),
+            output_bytes: output.len(),
+            estimated_output_tokens: estimated_tokens(output.len()),
+            succeeded: false,
+        };
+        span.record("output_bytes", metrics.output_bytes);
+        span.record("estimated_output_tokens", metrics.estimated_output_tokens);
+        span.record("duration_ms", metrics.duration_ms);
+        span.record("succeeded", false);
+        info!(
+            parent: span,
+            tool = name,
+            duration_ms = metrics.duration_ms,
+            input_bytes = metrics.input_bytes,
+            estimated_input_tokens = metrics.estimated_input_tokens,
+            output_bytes = metrics.output_bytes,
+            estimated_output_tokens = metrics.estimated_output_tokens,
+            succeeded = false,
+            "Tool execution usage"
+        );
+
+        if action == RecoveryAction::Escalate {
+            anyhow::bail!("Tool '{name}' recovery exhausted after {attempt} failures: {message}");
+        }
+        Ok(ToolExecution { output, metrics })
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -277,7 +445,12 @@ mod tests {
     use tracing_subscriber::{Layer, layer::Context, prelude::*};
 
     use super::{BashTool, ReadFileTool, TodoTool, ToolExecutionMetrics, ToolRegistry, ToonTool};
-    use crate::{hooks::HookDispatcher, permission::PermissionManager, types::TodoState};
+    use crate::{
+        error_recovery::{ErrorRecoveryConfig, ErrorRecoveryEngine},
+        hooks::HookDispatcher,
+        permission::PermissionManager,
+        types::TodoState,
+    };
 
     fn assert_usage(metrics: &ToolExecutionMetrics, name: &str, input: &str, output: &str) {
         assert_eq!(metrics.tool, name);
@@ -324,8 +497,10 @@ mod tests {
     #[tokio::test]
     async fn registry_reports_unknown_tools() {
         let registry = ToolRegistry::new();
-        let result = registry.dispatch("missing", "").await;
-        assert!(result.is_err());
+        let result = registry.dispatch_with_metrics("missing", "").await.unwrap();
+        assert!(result.output.contains("Unknown tool 'missing'"));
+        assert!(result.output.contains("recovery_context[1]"));
+        assert!(!result.metrics.succeeded);
     }
 
     #[tokio::test]
@@ -348,6 +523,7 @@ mod tests {
                 let mut registry = ToolRegistry::with_permissions_and_hooks(
                     permissions,
                     Arc::new(HookDispatcher::disabled()),
+                    Arc::new(ErrorRecoveryEngine::default()),
                 );
                 registry.register(BashTool);
 
@@ -417,7 +593,10 @@ mod tests {
     #[tokio::test]
     async fn registry_reports_usage_for_future_tools_and_failed_executions() {
         let mut registry = ToolRegistry::new();
-        registry.register(ProbeTool { fail: false });
+        registry.register(ProbeTool {
+            fail: false,
+            message: "probe failure",
+        });
         let input = "probe input";
         let output = registry
             .dispatch_with_metrics("probe", input)
@@ -427,7 +606,10 @@ mod tests {
         assert_usage(&output.metrics, "probe", input, "probe output");
 
         let mut registry = ToolRegistry::new();
-        registry.register(ProbeTool { fail: true });
+        registry.register(ProbeTool {
+            fail: true,
+            message: "probe failure",
+        });
         let failure = registry
             .dispatch_with_metrics("probe", input)
             .await
@@ -437,13 +619,55 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn tool_errors_feed_toon_correction_then_escalate_after_budget() {
+        let mut recovery_config = ErrorRecoveryConfig::default();
+        recovery_config.tool.max_attempts = 1;
+        let recovery = Arc::new(ErrorRecoveryEngine::new(recovery_config).unwrap());
+        let mut registry = ToolRegistry::with_recovery(recovery);
+        registry.register(ProbeTool {
+            fail: true,
+            message: "probe failure",
+        });
+
+        let feedback = registry
+            .dispatch_with_metrics("probe", "bad input")
+            .await
+            .unwrap();
+        assert!(!feedback.metrics.succeeded);
+        assert!(feedback.output.contains("tool_error[1]{error}"));
+        assert!(feedback.output.contains("recovery_context[1]"));
+        assert!(feedback.output.contains("feedback_injected"));
+
+        let escalated = registry.dispatch_with_metrics("probe", "bad input").await;
+        assert!(escalated.is_err());
+
+        let mut parse_config = ErrorRecoveryConfig::default();
+        parse_config.parse.max_attempts = 1;
+        let mut registry =
+            ToolRegistry::with_recovery(Arc::new(ErrorRecoveryEngine::new(parse_config).unwrap()));
+        registry.register(ProbeTool {
+            fail: true,
+            message: "Failed to parse tool arguments",
+        });
+        let feedback = registry
+            .dispatch_with_metrics("probe", "malformed arguments")
+            .await
+            .unwrap();
+        assert!(feedback.output.contains("parse"));
+        assert!(feedback.output.contains("feedback_injected"));
+    }
+
+    #[tokio::test]
     async fn dispatch_emits_tool_usage_in_a_tracing_span() {
         let _subscriber_lock = crate::test_telemetry::lock_test_subscriber();
         let captured = Arc::new(Mutex::new(Vec::new()));
         let subscriber = tracing_subscriber::registry().with(CaptureLayer(Arc::clone(&captured)));
         let dispatch = tracing::Dispatch::new(subscriber);
         let mut registry = ToolRegistry::new();
-        registry.register(ProbeTool { fail: false });
+        registry.register(ProbeTool {
+            fail: false,
+            message: "probe failure",
+        });
 
         registry
             .dispatch_with_metrics("probe", "test input")
@@ -502,6 +726,7 @@ mod tests {
 
     struct ProbeTool {
         fail: bool,
+        message: &'static str,
     }
 
     #[async_trait]
@@ -524,7 +749,7 @@ mod tests {
 
         async fn execute(&self, _payload: &str) -> Result<String> {
             if self.fail {
-                bail!("probe failure");
+                bail!("{}", self.message);
             }
             Ok("probe output".to_owned())
         }

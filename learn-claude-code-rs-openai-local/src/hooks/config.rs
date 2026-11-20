@@ -10,6 +10,8 @@ pub(crate) enum HookEvent {
     UserPromptSubmit,
     PreToolUse,
     PostToolUse,
+    Error,
+    Recovery,
     SubagentStart,
     SubagentStop,
 }
@@ -22,6 +24,8 @@ impl HookEvent {
             Self::UserPromptSubmit => "UserPromptSubmit",
             Self::PreToolUse => "PreToolUse",
             Self::PostToolUse => "PostToolUse",
+            Self::Error => "Error",
+            Self::Recovery => "Recovery",
             Self::SubagentStart => "SubagentStart",
             Self::SubagentStop => "SubagentStop",
         }

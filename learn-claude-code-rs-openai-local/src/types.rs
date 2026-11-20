@@ -97,6 +97,8 @@ pub struct AgentRonConfig {
     pub api_key: String,
     pub model: String,
     pub system_prompt: String,
+    #[serde(default)]
+    pub active_prompt: Option<String>,
     pub temperature: f32,
     pub max_turns: usize,
     #[serde(default = "default_agent_tools")]
@@ -622,6 +624,7 @@ mod tests {
                 api_key: "local",
                 model: "test-model",
                 system_prompt: "Be helpful.",
+                active_prompt: Some("concise"),
                 temperature: 0.2,
                 max_turns: 4,
                 allowed_tools: ["bash", "delegate_task"],
@@ -638,6 +641,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(config.model, "test-model");
+        assert_eq!(config.active_prompt.as_deref(), Some("concise"));
         assert_eq!(config.ollama_base_url, "http://localhost:11434");
         assert_eq!(config.skills_dir, PathBuf::from("skills"));
         assert!(!config.telemetry.enabled);
@@ -653,6 +657,7 @@ mod tests {
             .unwrap()
             .join("config/agent.ron");
         let config = AgentRonConfig::load(config_path).unwrap();
+        assert_eq!(config.active_prompt, None);
         assert!(config.skills_dir.ends_with("skills"));
         assert!(config.allowed_tools.contains(&"delegate_task".to_owned()));
         assert_eq!(

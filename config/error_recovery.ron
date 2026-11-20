@@ -1,0 +1,16 @@
+(
+    enabled: true,
+    hooks_enabled: true,
+    provider: (
+        max_retries: 2,
+        base_delay_ms: 100,
+        max_delay_ms: 2000,
+        jitter_percent: 20,
+    ),
+    tool: (
+        max_attempts: 2,
+    ),
+    parse: (
+        max_attempts: 2,
+    ),
+)

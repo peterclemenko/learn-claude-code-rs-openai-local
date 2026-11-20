@@ -24,14 +24,17 @@ use crate::memory::NoopMemoryBackend;
 use crate::{
     compactor::{CompactionConfig, ContextCompactor},
     context_window::{ContextWindowProvider, OllamaContextWindowProvider},
-    hooks::{HookConfig, HookContext, HookDecision, HookDispatcher, HookEvent},
+    error_recovery::{ErrorKind, ErrorRecoveryConfig, ErrorRecoveryEngine, RecoveryAction},
+    hooks::{
+        HookConfig, HookContext, HookDecision, HookDispatcher, HookEvent, RecoveryDiagnostics,
+    },
     memory::{MemoryBackend, MemoryQuery, build_memory_from_config, config::MemorySystemConfig},
     permission::PermissionManager,
     prompt::PromptManager,
     skills::SkillRegistry,
     subagent::DelegateTaskTool,
     tools::{BashTool, ReadFileTool, TodoTool, ToolRegistry},
-    types::{AgentRonConfig, SubagentConfig, TodoState},
+    types::{AgentRonConfig, SubagentConfig, TodoState, toon_table},
 };
 
 #[async_trait]
@@ -65,6 +68,7 @@ pub(crate) struct AgentRuntime {
     pub(crate) client: Arc<dyn ChatCompletionClient>,
     pub(crate) context_window_provider: Arc<dyn ContextWindowProvider>,
     pub(crate) compaction_config: Arc<CompactionConfig>,
+    pub(crate) recovery: Arc<ErrorRecoveryEngine>,
     pub(crate) subagents: Arc<Vec<SubagentConfig>>,
     pub(crate) skills: Arc<SkillRegistry>,
     pub(crate) permissions: Arc<Mutex<PermissionManager>>,
@@ -86,6 +90,7 @@ pub struct Agent {
     depth: usize,
     turns_completed: AtomicUsize,
     hooks: Arc<HookDispatcher>,
+    recovery: Arc<ErrorRecoveryEngine>,
     memory: Arc<dyn MemoryBackend>,
     prompts: Arc<PromptManager>,
 }
@@ -156,7 +161,7 @@ impl Agent {
         prompts: Arc<PromptManager>,
     ) -> Result<Self> {
         let skills = Arc::new(SkillRegistry::load_dir(&config.skills_dir)?);
-        Ok(Self::new_with_runtime(
+        Self::new_with_runtime(
             config,
             todo_state,
             context_window_provider,
@@ -166,7 +171,7 @@ impl Agent {
             permissions,
             memory,
             prompts,
-        ))
+        )
     }
 
     fn new_with_runtime(
@@ -179,7 +184,9 @@ impl Agent {
         permissions: Arc<Mutex<PermissionManager>>,
         memory: Arc<dyn MemoryBackend>,
         prompts: Arc<PromptManager>,
-    ) -> Self {
+    ) -> Result<Self> {
+        let recovery_config = ErrorRecoveryConfig::load_or_default("config/error_recovery.ron")?;
+        let recovery = Arc::new(ErrorRecoveryEngine::new(recovery_config)?);
         let hooks = if Path::new("config/hooks.ron").exists() {
             HookConfig::load("config/hooks.ron")
                 .map(HookDispatcher::from_config)
@@ -194,6 +201,7 @@ impl Agent {
             client,
             context_window_provider,
             compaction_config: Arc::new(compaction_config),
+            recovery,
             subagents: Arc::new(config.subagents.clone()),
             skills,
             permissions,
@@ -202,7 +210,14 @@ impl Agent {
             prompts: Arc::clone(&prompts),
         };
         let allowed_tools = config.allowed_tools.clone();
-        Self::from_runtime(config, todo_state, runtime, 0, None, allowed_tools)
+        Ok(Self::from_runtime(
+            config,
+            todo_state,
+            runtime,
+            0,
+            None,
+            allowed_tools,
+        ))
     }
 
     pub(crate) fn from_runtime(
@@ -216,6 +231,7 @@ impl Agent {
         let mut tools = ToolRegistry::with_permissions_and_hooks(
             Arc::clone(&runtime.permissions),
             Arc::clone(&runtime.hooks),
+            Arc::clone(&runtime.recovery),
         );
         for tool in &allowed_tools {
             match tool.as_str() {
@@ -266,6 +282,7 @@ impl Agent {
             depth,
             turns_completed: AtomicUsize::new(0),
             hooks: Arc::clone(&runtime.hooks),
+            recovery: Arc::clone(&runtime.recovery),
             memory: Arc::clone(&runtime.memory),
             prompts: Arc::clone(&runtime.prompts),
         }
@@ -302,6 +319,7 @@ impl Agent {
                 tool_output: None,
                 prompt: Some(prompt.to_owned()),
                 subagent_name: None,
+                recovery: None,
             })
             .await;
         if submitted.decision == HookDecision::Deny {
@@ -493,16 +511,87 @@ impl Agent {
             .tools(self.tools.openai_tools())
             .build()?;
 
-        let response = self
-            .client
-            .complete(request)
-            .instrument(tracing::span!(
-                tracing::Level::INFO,
-                "llm.chat_completion",
-                model = %self.config.model
-            ))
-            .await
-            .context("Local OpenAI-compatible chat completion request failed")?;
+        let mut provider_attempt = 0;
+        let mut previous_failure: Option<(ErrorKind, String, u32)> = None;
+        let response = loop {
+            let result = self
+                .client
+                .complete(request.clone())
+                .instrument(tracing::info_span!(
+                    "llm.chat_completion",
+                    model = %self.config.model,
+                    recovery.attempt = provider_attempt + 1,
+                ))
+                .await;
+            match result {
+                Ok(response) => {
+                    if let Some((kind, message, attempt)) = previous_failure {
+                        let context_toon = toon_table(
+                            "recovery_context",
+                            &["operation", "model", "attempt"],
+                            &[
+                                "provider_request".to_owned(),
+                                self.config.model.clone(),
+                                attempt.to_string(),
+                            ],
+                        );
+                        self.recovery
+                            .notify(
+                                &self.hooks,
+                                HookEvent::Recovery,
+                                None,
+                                RecoveryDiagnostics {
+                                    error_kind: kind.as_str().to_owned(),
+                                    recoverable: kind.is_recoverable(),
+                                    recovery_action: RecoveryAction::Retry.as_str().to_owned(),
+                                    attempt,
+                                    outcome: "recovered".to_owned(),
+                                    message,
+                                    context_toon,
+                                },
+                            )
+                            .await;
+                    }
+                    break response;
+                }
+                Err(error) => {
+                    provider_attempt += 1;
+                    let kind = ErrorKind::classify_provider_error(&error);
+                    let action = self.recovery.provider_action(kind, provider_attempt);
+                    let context_toon = toon_table(
+                        "recovery_context",
+                        &["operation", "model", "attempt"],
+                        &[
+                            "provider_request".to_owned(),
+                            self.config.model.clone(),
+                            provider_attempt.to_string(),
+                        ],
+                    );
+                    let diagnostic = RecoveryDiagnostics {
+                        error_kind: kind.as_str().to_owned(),
+                        recoverable: kind.is_recoverable(),
+                        recovery_action: action.as_str().to_owned(),
+                        attempt: provider_attempt,
+                        outcome: action.outcome().to_owned(),
+                        message: error.to_string(),
+                        context_toon,
+                    };
+                    self.recovery
+                        .notify(&self.hooks, HookEvent::Error, None, diagnostic.clone())
+                        .await;
+                    self.recovery
+                        .notify(&self.hooks, HookEvent::Recovery, None, diagnostic)
+                        .await;
+                    if action != RecoveryAction::Retry {
+                        return Err(error)
+                            .context("Local OpenAI-compatible chat completion recovery exhausted");
+                    }
+                    let delay = self.recovery.retry_delay(provider_attempt);
+                    tokio::time::sleep(delay).await;
+                    previous_failure = Some((kind, error.to_string(), provider_attempt));
+                }
+            }
+        };
         match response.usage.as_ref() {
             Some(usage) => {
                 let metrics = model_usage_metrics(usage, context_window_tokens);
@@ -651,11 +740,14 @@ mod tests {
     use std::{
         collections::VecDeque,
         path::Path,
-        sync::{Arc, Mutex},
+        sync::{
+            Arc, Mutex,
+            atomic::{AtomicUsize, Ordering},
+        },
     };
 
     use crate::permission::PermissionManager;
-    use anyhow::{Context, Result};
+    use anyhow::{Context, Result, bail};
     use async_openai::types::chat::{
         ChatCompletionRequestMessage, CompletionUsage, CreateChatCompletionRequest,
         CreateChatCompletionResponse,
@@ -684,6 +776,7 @@ mod tests {
     struct MockChatClient {
         responses: Mutex<VecDeque<CreateChatCompletionResponse>>,
         requests: Mutex<Vec<CreateChatCompletionRequest>>,
+        transient_failures: AtomicUsize,
     }
 
     impl MockChatClient {
@@ -691,6 +784,18 @@ mod tests {
             Self {
                 responses: Mutex::new(responses.into()),
                 requests: Mutex::new(Vec::new()),
+                transient_failures: AtomicUsize::new(0),
+            }
+        }
+
+        fn with_transient_failures(
+            responses: Vec<CreateChatCompletionResponse>,
+            failures: usize,
+        ) -> Self {
+            Self {
+                responses: Mutex::new(responses.into()),
+                requests: Mutex::new(Vec::new()),
+                transient_failures: AtomicUsize::new(failures),
             }
         }
 
@@ -706,11 +811,34 @@ mod tests {
             request: CreateChatCompletionRequest,
         ) -> Result<CreateChatCompletionResponse> {
             self.requests.lock().unwrap().push(request);
+            if take_transient_failure(&self.transient_failures) {
+                bail!("temporary connection failure");
+            }
             self.responses
                 .lock()
                 .unwrap()
                 .pop_front()
                 .context("Mock chat response queue is empty")
+        }
+    }
+
+    fn take_transient_failure(failures: &AtomicUsize) -> bool {
+        loop {
+            let remaining = failures.load(Ordering::Relaxed);
+            if remaining == 0 {
+                return false;
+            }
+            if failures
+                .compare_exchange_weak(
+                    remaining,
+                    remaining - 1,
+                    Ordering::Relaxed,
+                    Ordering::Relaxed,
+                )
+                .is_ok()
+            {
+                return true;
+            }
         }
     }
 
@@ -768,6 +896,7 @@ mod tests {
             api_key: "test-key".to_owned(),
             model: "parent-model".to_owned(),
             system_prompt: "Parent system prompt.".to_owned(),
+            active_prompt: None,
             temperature: 0.1,
             max_turns: 5,
             allowed_tools: ["bash", "read_file", "todo_write", "delegate_task"]
@@ -895,6 +1024,31 @@ mod tests {
                         if content == "Latest question"
                 )
         )));
+    }
+
+    #[tokio::test]
+    async fn run_turns_retries_transient_provider_failures_with_a_bound() {
+        let client = Arc::new(MockChatClient::with_transient_failures(
+            vec![response(Some("Recovered response."), vec![])],
+            2,
+        ));
+        let agent = Agent::new_with_chat_client(
+            test_config(),
+            Arc::new(Mutex::new(TodoState::default())),
+            Arc::new(MockContextWindow {
+                context_window_tokens: 8_192,
+            }),
+            client.clone(),
+        )
+        .unwrap();
+        let mut messages: Vec<ChatCompletionRequestMessage> =
+            serde_json::from_value(json!([{"role":"user","content":"Test recovery"}])).unwrap();
+
+        assert_eq!(
+            agent.run_turns(&mut messages).await.unwrap(),
+            "Recovered response."
+        );
+        assert_eq!(client.requests().len(), 3);
     }
 
     #[tokio::test]

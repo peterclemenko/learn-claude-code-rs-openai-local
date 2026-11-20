@@ -207,6 +207,7 @@ impl DelegateTaskTool {
                     tool_output: None,
                     prompt: Some(request.task.clone()),
                     subagent_name: Some(subagent.name.clone()),
+                    recovery: None,
                 })
                 .await;
             if start_hook.decision == HookDecision::Deny {
@@ -254,6 +255,7 @@ impl DelegateTaskTool {
                             tool_output: Some(result.clone()),
                             prompt: Some(request.task.clone()),
                             subagent_name: Some(subagent.name.clone()),
+                            recovery: None,
                         })
                         .await;
                     let result = SubagentResult {
@@ -290,6 +292,7 @@ impl DelegateTaskTool {
                             tool_output: Some(run_error.to_string()),
                             prompt: Some(request.task.clone()),
                             subagent_name: Some(subagent.name.clone()),
+                            recovery: None,
                         })
                         .await;
                     let span = tracing::Span::current();

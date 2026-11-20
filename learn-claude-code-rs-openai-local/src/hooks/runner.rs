@@ -8,6 +8,17 @@ use tracing::{error, info, instrument, warn};
 use super::config::{HookBackend, HookPayloadFormat, HookRule};
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub(crate) struct RecoveryDiagnostics {
+    pub(crate) error_kind: String,
+    pub(crate) recoverable: bool,
+    pub(crate) recovery_action: String,
+    pub(crate) attempt: u32,
+    pub(crate) outcome: String,
+    pub(crate) message: String,
+    pub(crate) context_toon: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub(crate) struct HookContext {
     pub(crate) event: String,
     #[serde(default)]
@@ -20,6 +31,8 @@ pub(crate) struct HookContext {
     pub(crate) prompt: Option<String>,
     #[serde(default)]
     pub(crate) subagent_name: Option<String>,
+    #[serde(default)]
+    pub(crate) recovery: Option<RecoveryDiagnostics>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default, PartialEq, Eq)]

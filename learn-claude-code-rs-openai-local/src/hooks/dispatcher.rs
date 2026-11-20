@@ -116,12 +116,25 @@ impl HookDispatcher {
             hook.tool_name = tracing::field::Empty,
             hook.decision = tracing::field::Empty,
             hook.duration_ms = tracing::field::Empty,
+            error.kind = tracing::field::Empty,
+            error.recoverable = tracing::field::Empty,
+            recovery.action = tracing::field::Empty,
+            recovery.attempt = tracing::field::Empty,
+            recovery.outcome = tracing::field::Empty,
         )
     )]
     pub(crate) async fn dispatch(&self, mut context: HookContext) -> HookDispatchResult {
         let dispatch_started = Instant::now();
         if let Some(tool_name) = &context.tool_name {
             tracing::Span::current().record("hook.tool_name", tool_name.as_str());
+        }
+        if let Some(recovery) = &context.recovery {
+            let span = tracing::Span::current();
+            span.record("error.kind", recovery.error_kind.as_str());
+            span.record("error.recoverable", recovery.recoverable);
+            span.record("recovery.action", recovery.recovery_action.as_str());
+            span.record("recovery.attempt", i64::from(recovery.attempt));
+            span.record("recovery.outcome", recovery.outcome.as_str());
         }
         let event = context.event.parse().unwrap_or(HookEvent::SessionStart);
         let mut aggregate = HookDispatchResult {
@@ -293,6 +306,7 @@ impl HookDispatcher {
             tool_output: None,
             prompt: None,
             subagent_name: None,
+            recovery: None,
         })
         .await
     }
@@ -305,6 +319,7 @@ impl HookDispatcher {
             tool_output: None,
             prompt: None,
             subagent_name: None,
+            recovery: None,
         })
         .await
     }
@@ -329,6 +344,8 @@ impl std::str::FromStr for HookEvent {
             "UserPromptSubmit" => Ok(Self::UserPromptSubmit),
             "PreToolUse" => Ok(Self::PreToolUse),
             "PostToolUse" => Ok(Self::PostToolUse),
+            "Error" => Ok(Self::Error),
+            "Recovery" => Ok(Self::Recovery),
             "SubagentStart" => Ok(Self::SubagentStart),
             "SubagentStop" => Ok(Self::SubagentStop),
             _ => Err(()),
@@ -471,6 +488,7 @@ mod otel_hook_tests {
             tool_output: None,
             prompt: None,
             subagent_name: None,
+            recovery: None,
         };
 
         let allow = dispatch(serde_json::json!({"decision":"allow"}), "allow stderr")
@@ -539,6 +557,7 @@ mod otel_hook_tests {
                 tool_output: None,
                 prompt: None,
                 subagent_name: None,
+                recovery: None,
             })
             .with_subscriber(otel_only_subscriber(&provider))
             .await;
@@ -582,6 +601,7 @@ mod otel_hook_tests {
                 tool_output: None,
                 prompt: None,
                 subagent_name: None,
+                recovery: None,
             })
             .with_subscriber(otel_only_subscriber(&provider))
             .await;
@@ -623,6 +643,7 @@ mod otel_hook_tests {
                 tool_output: Some("content".to_owned()),
                 prompt: None,
                 subagent_name: None,
+                recovery: None,
             })
             .with_subscriber(otel_only_subscriber(&provider))
             .await;
