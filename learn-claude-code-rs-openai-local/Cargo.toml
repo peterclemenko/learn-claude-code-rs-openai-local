@@ -42,4 +42,4 @@ tracing-subscriber = { workspace = true }
 walkdir = { workspace = true }
 wildmatch = { workspace = true }
 turso = "0.8.3"
-stoolap = "0.5.0"
+stoolap = { version = "0.5.0", default-features = false }

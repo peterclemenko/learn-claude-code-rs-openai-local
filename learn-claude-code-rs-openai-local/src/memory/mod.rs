@@ -1,3 +1,4 @@
+mod mempalace_stoolap;
 mod naive_memory_system;
 
 pub mod config;
@@ -12,8 +13,12 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use tracing::{error, info, instrument};
 
+pub use mempalace_stoolap::{MemPalaceStoolapMemory, MemoryEmbeddingProvider};
 pub use naive_memory_system::{NaiveMemorySystem, NoopMemoryBackend};
-pub use registry::{MemoryRegistry, build_memory_from_config, register_memory_backend};
+pub use registry::{
+    MemoryRegistry, build_memory_from_config, register_memory_backend,
+    register_memory_backend_with_validator,
+};
 
 pub type MemoryResult<T> = Result<T>;
 

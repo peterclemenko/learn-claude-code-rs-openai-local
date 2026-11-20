@@ -18,8 +18,8 @@ use tracing::{info, info_span};
 use tracing_subscriber::prelude::*;
 
 use super::{
-    MemoryBackend, MemoryCategory, MemoryEntry, MemoryQuery, MemoryRecord, MemoryRegistry,
-    NaiveMemorySystem, config::MemorySystemConfig,
+    MemPalaceStoolapMemory, MemoryBackend, MemoryCategory, MemoryEntry, MemoryQuery, MemoryRecord,
+    MemoryRegistry, NaiveMemorySystem, config::MemorySystemConfig,
 };
 
 static NEXT_TEMP_DIRECTORY: AtomicU64 = AtomicU64::new(1);
@@ -393,6 +393,17 @@ async fn memory_backend_conformance_suite_passes_for_builtin_and_custom_backends
     let reopened_naive = NaiveMemorySystem::open(&naive_config)?;
     assert_rehydrated(&reopened_naive, &naive_id, &naive_content).await?;
 
+    let palace_dir = TestDirectory::new("mempalace-conformance");
+    let palace_config_path =
+        palace_dir.write_config("mempalace_stoolap", palace_dir.path().join("palace-store"));
+    let palace_config = MemorySystemConfig::load(palace_config_path)?;
+    let palace = MemoryRegistry::new().build(&palace_config)?;
+    ensure!(palace.backend_name() == "mempalace_stoolap");
+    let (palace_id, palace_content) = run_backend_conformance_suite(Arc::clone(&palace)).await?;
+    drop(palace);
+    let reopened_palace = MemPalaceStoolapMemory::open(&palace_config)?;
+    assert_rehydrated(&reopened_palace, &palace_id, &palace_content).await?;
+
     let custom_dir = TestDirectory::new("custom-conformance");
     let custom_config_path =
         custom_dir.write_config("test_custom", custom_dir.path().join("custom-store"));
@@ -411,7 +422,12 @@ async fn memory_config_selects_naive_noop_and_custom_backends() -> Result<()> {
     let _subscriber_lock = crate::test_telemetry::lock_test_subscriber();
     let directory = TestDirectory::new("backend-selection");
     let registry = custom_registry();
-    for backend_name in ["naive_memory_system", "noop", "test_custom"] {
+    for backend_name in [
+        "naive_memory_system",
+        "mempalace_stoolap",
+        "noop",
+        "test_custom",
+    ] {
         let config_path = directory.write_config(
             backend_name,
             directory.path().join(format!("{backend_name}-store")),
@@ -516,6 +532,10 @@ fn memory_corrupt_store_returns_an_error_without_panicking() -> Result<()> {
 fn otel_memory_config_registry_and_backend_operations_export_attributes() -> Result<()> {
     let _subscriber_lock = crate::test_telemetry::lock_test_subscriber();
     let telemetry = OtelCapture::new();
+    let mut invalid_config = MemorySystemConfig::default();
+    invalid_config.recall_limit = 0;
+    ensure!(invalid_config.validate().is_err());
+
     let directory = TestDirectory::new("otel-conformance");
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -524,7 +544,19 @@ fn otel_memory_config_registry_and_backend_operations_export_attributes() -> Res
         let config_path =
             directory.write_config("naive_memory_system", directory.path().join("store"));
         let config = MemorySystemConfig::load(config_path)?;
-        let backend = MemoryRegistry::new().build(&config)?;
+        let registry = MemoryRegistry::new();
+        let backend = registry.build(&config)?;
+        let mut invalid_options = config.clone();
+        invalid_options
+            .backend_options
+            .insert("file_nam".to_owned(), "memories.ron".to_owned());
+        ensure!(
+            registry
+                .build(&invalid_options)
+                .err()
+                .is_some_and(|failure| failure.to_string().contains("file_name")),
+            "backend option validation should report valid options"
+        );
         let id = backend
             .remember(entry(MemoryCategory::Preference, "otel-memory-marker"))
             .await?;
@@ -558,12 +590,40 @@ fn otel_memory_config_registry_and_backend_operations_export_attributes() -> Res
     assert_string_attribute(config_span, "memory.backend", "naive_memory_system");
     assert_string_attribute(config_span, "memory.outcome", "ok");
 
+    let validation_span = spans
+        .iter()
+        .find(|span| {
+            span.name.as_ref() == "memory.config.validate"
+                && matches!(
+                    attribute(span, "memory.outcome"),
+                    Some(Value::String(value)) if value.as_str() == "error"
+                )
+        })
+        .context("missing failed memory config validation span")?;
+    assert_string_attribute(validation_span, "memory.backend", "naive_memory_system");
+
     let registry_span = spans
         .iter()
         .find(|span| span.name.as_ref() == "memory.backend.build")
         .context("missing memory backend build span")?;
     assert_string_attribute(registry_span, "memory.backend", "naive_memory_system");
     assert_string_attribute(registry_span, "memory.outcome", "ok");
+
+    let failed_registry_span = spans
+        .iter()
+        .find(|span| {
+            span.name.as_ref() == "memory.backend.build"
+                && matches!(
+                    attribute(span, "memory.outcome"),
+                    Some(Value::String(value)) if value.as_str() == "error"
+                )
+        })
+        .context("missing failed memory backend validation span")?;
+    assert_string_attribute(
+        failed_registry_span,
+        "memory.backend",
+        "naive_memory_system",
+    );
 
     for operation in [
         "remember",

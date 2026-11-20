@@ -3,21 +3,28 @@ use std::{
     sync::{Arc, OnceLock, RwLock},
 };
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use tracing::{error, info, instrument};
 
 use super::{
-    MemoryBackend, MemoryResult, NaiveMemorySystem, NoopMemoryBackend, config::MemorySystemConfig,
-    observed_backend,
+    MemPalaceStoolapMemory, MemoryBackend, MemoryResult, NaiveMemorySystem, NoopMemoryBackend,
+    config::MemorySystemConfig, observed_backend,
 };
 
 type BackendBuilder =
     Arc<dyn Fn(&MemorySystemConfig) -> MemoryResult<Arc<dyn MemoryBackend>> + Send + Sync>;
+type BackendValidator = Arc<dyn Fn(&MemorySystemConfig) -> MemoryResult<()> + Send + Sync>;
+
+#[derive(Clone)]
+struct BackendRegistration {
+    builder: BackendBuilder,
+    validate: BackendValidator,
+}
 
 /// Maps backend identifiers to constructors for pluggable implementations.
 #[derive(Clone, Default)]
 pub struct MemoryRegistry {
-    builders: BTreeMap<String, BackendBuilder>,
+    builders: BTreeMap<String, BackendRegistration>,
 }
 
 static DEFAULT_REGISTRY: OnceLock<RwLock<MemoryRegistry>> = OnceLock::new();
@@ -27,21 +34,42 @@ fn default_registry() -> &'static RwLock<MemoryRegistry> {
 }
 
 impl MemoryRegistry {
-    /// Creates a registry containing the naive memory system and noop backend.
+    /// Creates a registry containing all built-in memory backends.
     pub fn new() -> Self {
         let mut registry = Self::default();
         registry.builders.insert(
             "naive_memory_system".to_owned(),
-            Arc::new(|config| Ok(Arc::new(NaiveMemorySystem::open(config)?))),
+            BackendRegistration {
+                builder: Arc::new(|config| Ok(Arc::new(NaiveMemorySystem::open(config)?))),
+                validate: Arc::new(|config| validate_backend_options(config, &["file_name"])),
+            },
+        );
+        registry.builders.insert(
+            "mempalace_stoolap".to_owned(),
+            BackendRegistration {
+                builder: Arc::new(|config| Ok(Arc::new(MemPalaceStoolapMemory::open(config)?))),
+                validate: Arc::new(|config| validate_backend_options(config, &[])),
+            },
         );
         registry.builders.insert(
             "noop".to_owned(),
-            Arc::new(|_| Ok(Arc::new(NoopMemoryBackend))),
+            BackendRegistration {
+                builder: Arc::new(|_| Ok(Arc::new(NoopMemoryBackend))),
+                validate: Arc::new(|config| validate_backend_options(config, &[])),
+            },
         );
         registry
     }
 
+    /// Returns every registered backend identifier in deterministic sorted order.
+    pub fn available_backends(&self) -> Vec<String> {
+        self.builders.keys().cloned().collect()
+    }
+
     /// Registers a custom backend constructor under a unique identifier.
+    ///
+    /// Custom builders accept any `backend_options` keys by default. Use
+    /// [`Self::register_with_validator`] to validate a backend-specific schema.
     #[instrument(
         name = "memory.backend.register_local",
         skip(self, name, builder),
@@ -55,7 +83,36 @@ impl MemoryRegistry {
         + Sync
         + 'static,
     ) -> Result<()> {
-        let name = name.into();
+        self.register_inner(name.into(), builder, |_| Ok(()))
+    }
+
+    /// Registers a custom backend with explicit config validation before construction.
+    #[instrument(
+        name = "memory.backend.register_validated",
+        skip(self, name, builder, validator),
+        fields(memory.backend = tracing::field::Empty, memory.outcome = tracing::field::Empty)
+    )]
+    pub fn register_with_validator(
+        &mut self,
+        name: impl Into<String>,
+        builder: impl Fn(&MemorySystemConfig) -> MemoryResult<Arc<dyn MemoryBackend>>
+        + Send
+        + Sync
+        + 'static,
+        validator: impl Fn(&MemorySystemConfig) -> MemoryResult<()> + Send + Sync + 'static,
+    ) -> Result<()> {
+        self.register_inner(name.into(), builder, validator)
+    }
+
+    fn register_inner(
+        &mut self,
+        name: String,
+        builder: impl Fn(&MemorySystemConfig) -> MemoryResult<Arc<dyn MemoryBackend>>
+        + Send
+        + Sync
+        + 'static,
+        validator: impl Fn(&MemorySystemConfig) -> MemoryResult<()> + Send + Sync + 'static,
+    ) -> Result<()> {
         tracing::Span::current().record("memory.backend", name.as_str());
         if name.trim().is_empty() {
             let failure = anyhow::anyhow!("Memory backend name must not be empty");
@@ -69,7 +126,13 @@ impl MemoryRegistry {
             error!(memory.backend = %name, error = %failure, "Memory backend registration failed");
             return Err(failure);
         }
-        self.builders.insert(name, Arc::new(builder));
+        self.builders.insert(
+            name,
+            BackendRegistration {
+                builder: Arc::new(builder),
+                validate: Arc::new(validator),
+            },
+        );
         tracing::Span::current().record("memory.outcome", "ok");
         Ok(())
     }
@@ -83,18 +146,31 @@ impl MemoryRegistry {
         )
     )]
     pub fn build(&self, config: &MemorySystemConfig) -> Result<Arc<dyn MemoryBackend>> {
+        let Some(registration) = self.builders.get(&config.backend) else {
+            let failure = anyhow::anyhow!(
+                "Unknown memory backend '{}'. Registered backends: {:?}",
+                config.backend,
+                self.available_backends()
+            );
+            tracing::Span::current().record("memory.outcome", "error");
+            error!(memory.backend = %config.backend, error = %failure, "Memory backend is not registered");
+            return Err(failure);
+        };
         if let Err(failure) = config.validate() {
             tracing::Span::current().record("memory.outcome", "error");
             error!(error = %failure, "Memory backend configuration is invalid");
             return Err(failure);
         }
-        let Some(builder) = self.builders.get(&config.backend) else {
-            let failure = anyhow::anyhow!("Unknown memory backend '{}'", config.backend);
+        if let Err(failure) = (registration.validate)(config) {
+            let failure = anyhow::anyhow!(
+                "Invalid configuration for memory backend '{}': {failure:#}",
+                config.backend
+            );
             tracing::Span::current().record("memory.outcome", "error");
-            error!(memory.backend = %config.backend, error = %failure, "Memory backend is not registered");
+            error!(memory.backend = %config.backend, error = %failure, "Memory backend configuration validation failed");
             return Err(failure);
-        };
-        let backend = match builder(config)
+        }
+        let backend = match (registration.builder)(config)
             .with_context(|| format!("Failed to construct memory backend '{}'", config.backend))
         {
             Ok(backend) => backend,
@@ -111,6 +187,27 @@ impl MemoryRegistry {
     }
 }
 
+fn validate_backend_options(
+    config: &MemorySystemConfig,
+    valid_options: &[&str],
+) -> MemoryResult<()> {
+    let invalid_options = config
+        .backend_options
+        .keys()
+        .filter(|option| !valid_options.contains(&option.as_str()))
+        .cloned()
+        .collect::<Vec<_>>();
+    if !invalid_options.is_empty() {
+        bail!(
+            "Backend '{}' does not accept backend_options keys {:?}; valid options are {:?}",
+            config.backend,
+            invalid_options,
+            valid_options
+        );
+    }
+    Ok(())
+}
+
 /// Registers a backend in the process-wide registry used by agent startup.
 #[instrument(name = "memory.backend.register", skip(name, builder), fields(memory.backend = tracing::field::Empty))]
 pub fn register_memory_backend(
@@ -119,6 +216,25 @@ pub fn register_memory_backend(
     + Send
     + Sync
     + 'static,
+) -> Result<()> {
+    let name = name.as_ref().to_owned();
+    tracing::Span::current().record("memory.backend", name.as_str());
+    register_memory_backend_with_validator(name, builder, |_| Ok(()))
+}
+
+/// Registers a process-wide backend and validates its configuration before building it.
+#[instrument(
+    name = "memory.backend.register_validated",
+    skip(name, builder, validator),
+    fields(memory.backend = tracing::field::Empty)
+)]
+pub fn register_memory_backend_with_validator(
+    name: impl AsRef<str>,
+    builder: impl Fn(&MemorySystemConfig) -> MemoryResult<Arc<dyn MemoryBackend>>
+    + Send
+    + Sync
+    + 'static,
+    validator: impl Fn(&MemorySystemConfig) -> MemoryResult<()> + Send + Sync + 'static,
 ) -> Result<()> {
     let name = name.as_ref().to_owned();
     tracing::Span::current().record("memory.backend", name.as_str());
@@ -131,7 +247,7 @@ pub fn register_memory_backend(
             return Err(failure);
         }
     };
-    registry.register(name, builder)
+    registry.register_with_validator(name, builder, validator)
 }
 
 /// Builds the configured backend and wraps its operations in OTel instrumentation.
@@ -224,6 +340,58 @@ mod tests {
                 .register("noop", |_| Ok(Arc::new(NoopMemoryBackend)))
                 .is_err()
         );
+    }
+
+    #[test]
+    fn registry_lists_backend_ids_and_reports_unknown_backend_options() {
+        let registry = MemoryRegistry::new();
+        assert_eq!(
+            registry.available_backends(),
+            ["mempalace_stoolap", "naive_memory_system", "noop"]
+        );
+
+        let mut config = MemorySystemConfig::default();
+        config.backend = "noop".to_owned();
+        config
+            .backend_options
+            .insert("typo".to_owned(), "value".to_owned());
+        let failure = registry.build(&config).err().unwrap().to_string();
+        assert!(failure.contains("typo"));
+        assert!(failure.contains("valid options are []"));
+    }
+
+    #[test]
+    fn registry_unknown_backend_error_lists_registered_ids() {
+        let mut config = MemorySystemConfig::default();
+        config.backend = "not_registered".to_owned();
+        let failure = MemoryRegistry::new()
+            .build(&config)
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(failure.contains("mempalace_stoolap"));
+        assert!(failure.contains("naive_memory_system"));
+        assert!(failure.contains("noop"));
+    }
+
+    #[test]
+    fn registry_custom_backend_validator_rejects_invalid_options() {
+        let mut registry = MemoryRegistry::new();
+        registry
+            .register_with_validator(
+                "strict_custom",
+                |_| Ok(Arc::new(NoopMemoryBackend)),
+                |config| super::validate_backend_options(config, &["endpoint"]),
+            )
+            .unwrap();
+        let mut config = MemorySystemConfig::default();
+        config.backend = "strict_custom".to_owned();
+        config
+            .backend_options
+            .insert("endpont".to_owned(), "local".to_owned());
+        let failure = registry.build(&config).err().unwrap().to_string();
+        assert!(failure.contains("endpont"));
+        assert!(failure.contains("endpoint"));
     }
 
     #[test]

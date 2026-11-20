@@ -1,21 +1,85 @@
-// The backend identifier selects a registered implementation.
+// Memory backend configuration.
+//
+// Built-in backend identifiers: "mempalace_stoolap", "naive_memory_system",
+// and "noop". Custom identifiers become valid after registration through
+// register_memory_backend() or MemoryRegistry::register(); custom validators
+// can enforce their own backend_options schema.
+//
+// Backend switching: with backend_options empty, change only `backend` below.
+// Top-level field names are strict; unrecognized fields fail RON parsing.
 (
+    // Required registry key. Default when config is absent: "naive_memory_system".
+    // Select one of the built-ins above or a registered custom backend.
     backend: "naive_memory_system",
-    // Relative storage paths resolve from this configuration file.
+
+    // Required, non-empty path. Relative values resolve from this RON file's directory.
+    // Default: ".local/memory".
     storage_dir: "../.local/memory",
-    // Maximum number of matching records included in prompt context.
+
+    // Maximum recall results / prompt memory rows. Must be in 1..=i64::MAX.
+    // Default: 5.
     recall_limit: 5,
-    // Disable categories here to prevent storing or recalling them.
+
+    // Any unique subset of Preference, Fact, Feedback, and Reference (empty disables all).
+    // Defaults to all four.
     enabled_categories: [Preference, Fact, Feedback, Reference],
-    // Scores multiply lexical match counts for category prioritization.
+
+    // Optional canonical category-name multipliers. Values must be finite and >= 0.0;
+    // omitted categories use 1.0. Defaults: Preference=2.0, Fact=1.0,
+    // Feedback=1.5, Reference=0.75.
     category_weights: {
         "Preference": 2.0,
         "Fact": 1.0,
         "Feedback": 1.5,
         "Reference": 0.75,
     },
-    // Backend-specific options are intentionally string-valued and extensible.
-    backend_options: {
-        "file_name": "memories.ron",
-    },
+
+    // Strict backend-specific string options. Built-ins allow only:
+    // naive_memory_system: "file_name" (plain filename; default "memories.ron")
+    // mempalace_stoolap and noop: no options. Keep empty for one-line switching.
+    // Custom backends may accept arbitrary keys or validate an allowlist.
+    backend_options: {},
+
+    // Typed MemPalace settings. Unknown fields and wrong value types fail RON parsing.
+    // These are used only when backend == "mempalace_stoolap".
+    mempalace_stoolap: (
+        // "persistent" (default) or "memory".
+        storage_mode: "persistent",
+        // Non-empty path relative to storage_dir, absolute path, or Stoolap file:// URI.
+        // Default: "mempalace-db".
+        database_path: "mempalace-db",
+        // Positive vector dimension; must match an injected embedding provider.
+        // Default: 384.
+        vector_dimensions: 384,
+        // "cosine" (default) or "l2".
+        vector_metric: "cosine",
+        // Non-empty fallback palace hierarchy labels.
+        // Defaults: wing="project", room="general".
+        default_wing: "project",
+        default_room: "general",
+        // Positive maximum number of closet wake-up rows. Default: 8.
+        wake_up_limit: 8,
+    ),
 )
+
+// Ready-to-use backend switches (edit the active `backend` field above):
+//
+// Naive RON-file backend (optional override; backend_options may stay empty):
+// backend: "naive_memory_system",
+// backend_options: {"file_name": "memories.ron"},
+//
+// MemPalace Stoolap backend (the typed options above are its defaults):
+// backend: "mempalace_stoolap",
+// mempalace_stoolap: (
+//     storage_mode: "persistent",
+//     database_path: "mempalace-db",
+//     vector_dimensions: 384,
+//     vector_metric: "cosine",
+//     default_wing: "project",
+//     default_room: "general",
+//     wake_up_limit: 8,
+// ),
+//
+// No-op backend (requires no backend-specific options):
+// backend: "noop",
+// backend_options: {},
